@@ -6,14 +6,17 @@ ronds lumineux), construit en 3D (capsules + ellipsoïde), rendu en
 sur-échantillonnage, éclairé en aplats tramés (Bayer 8x8), avec contour
 lumineux et traits intérieurs.
 
-Scénario façon anime :
-  [plan large de profil] allumage, neige -> traits de vitesse, il fonce depuis la droite
-  (images rémanentes) -> dérapage (poussière, secousse) -> [gros plan] il tourne la tête
-  -> les yeux s'allument (image d'impact inversée) -> [vue de dessus, la caméra descend]
-  il arme son lancer et lance la carte qui file en tournoyant -> [de face] la carte
-  arrive droit sur l'écran (lignes de concentration) ->
-  impact (éclat, secousse) -> les modules du QR tombent en place ->
-  balayage -> textes -> QR fixe QR_HOLD_MS.
+Scénario façon anime (~11 s, chaque plan nommé ; voir tools/audit_intro.py) :
+  démarrage    : point, ligne, neige, invite "> BOOT CARD_OS", barre de progression
+  1 profil     : traits de vitesse, il fonce (images rémanentes), dérape, s'immobilise
+  2 gros plan  : il tourne la tête, orbites vides, les yeux s'allument (un seul
+                 flash inversé), la visée se resserre : LOCK
+  3 dessus     : la caméra descend, il arme, lance au ralenti, la carte file en tournoyant
+  4 face       : la carte arrive de loin droit sur l'écran
+  5 impact     : la carte plaque l'écran, un faisceau la numérise, ses traits se
+                 décomposent en pixels qui deviennent le QR
+  6 QR         : balayage, "SCAN ME", puis QR fixe QR_HOLD_MS
+Au plus 2 flashes plein écran par seconde (WCAG 2.3.1 : 3 max).
 
 Sorties :
   preview/intro.gif                      aperçu x4, rendu "pixels d'OLED", vraies durées
@@ -446,16 +449,56 @@ def spotlight(buf, fig, radius=24.0):
 
 
 # ================================================================ QR
-FONT = {
-    "S": ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
-    "C": ["01111", "10000", "10000", "10000", "10000", "10000", "01111"],
-    "A": ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
-    "N": ["10001", "11001", "10101", "10011", "10001", "10001", "10001"],
-    "M": ["10001", "11011", "10101", "10101", "10001", "10001", "10001"],
-    "E": ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
-    "i": ["1", "0", "1", "1", "1", "1", "1"],
-    "n": ["00000", "00000", "11110", "10001", "10001", "10001", "10001"],
-}
+# Police 5x7 (majuscules, chiffres, quelques signes) pour l'interface façon terminal
+_GLYPHS = """
+A 01110 10001 10001 11111 10001 10001 10001
+B 11110 10001 10001 11110 10001 10001 11110
+C 01111 10000 10000 10000 10000 10000 01111
+D 11110 10001 10001 10001 10001 10001 11110
+E 11111 10000 10000 11110 10000 10000 11111
+F 11111 10000 10000 11110 10000 10000 10000
+G 01111 10000 10000 10011 10001 10001 01111
+H 10001 10001 10001 11111 10001 10001 10001
+I 11111 00100 00100 00100 00100 00100 11111
+J 00111 00010 00010 00010 00010 10010 01100
+K 10001 10010 10100 11000 10100 10010 10001
+L 10000 10000 10000 10000 10000 10000 11111
+M 10001 11011 10101 10101 10001 10001 10001
+N 10001 11001 10101 10011 10001 10001 10001
+O 01110 10001 10001 10001 10001 10001 01110
+P 11110 10001 10001 11110 10000 10000 10000
+Q 01110 10001 10001 10001 10101 10010 01101
+R 11110 10001 10001 11110 10100 10010 10001
+S 01111 10000 10000 01110 00001 00001 11110
+T 11111 00100 00100 00100 00100 00100 00100
+U 10001 10001 10001 10001 10001 10001 01110
+V 10001 10001 10001 10001 10001 01010 00100
+W 10001 10001 10001 10101 10101 10101 01010
+X 10001 10001 01010 00100 01010 10001 10001
+Y 10001 10001 01010 00100 00100 00100 00100
+Z 11111 00001 00010 00100 01000 10000 11111
+0 01110 10011 10101 10101 11001 10001 01110
+1 00100 01100 00100 00100 00100 00100 01110
+2 01110 10001 00001 00010 00100 01000 11111
+3 11110 00001 00001 01110 00001 00001 11110
+4 00010 00110 01010 10010 11111 00010 00010
+5 11111 10000 11110 00001 00001 10001 01110
+6 00110 01000 10000 11110 10001 10001 01110
+7 11111 00001 00010 00100 01000 01000 01000
+8 01110 10001 10001 01110 10001 10001 01110
+9 01110 10001 10001 01111 00001 00010 01100
+> 01000 00100 00010 00001 00010 00100 01000
+. 00000 00000 00000 00000 00000 01100 01100
+: 00000 01100 01100 00000 01100 01100 00000
+_ 00000 00000 00000 00000 00000 00000 11111
+- 00000 00000 00000 11111 00000 00000 00000
+/ 00001 00010 00010 00100 01000 01000 10000
+% 11001 11010 00010 00100 01000 01011 10011
+"""
+FONT = {line[0]: line[2:].split() for line in _GLYPHS.strip().splitlines()}
+FONT[" "] = ["000"] * 7
+FONT["i"] = ["1", "0", "1", "1", "1", "1", "1"]
+FONT["n"] = ["00000", "00000", "11110", "10001", "10001", "10001", "10001"]
 
 
 def text(buf, x, y, s, v):
@@ -520,32 +563,70 @@ def in_finder(r, c):
 
 
 # ================================================================ scénario
+def reticle(buf, cx, cy, half_w, half_h, arm=4, v=True):
+    """Coins de visée (interface "verrouillage de cible")."""
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            x, y = int(cx + sx * half_w), int(cy + sy * half_h)
+            for i in range(arm):
+                for px, py in ((x - sx * i, y), (x, y - sy * i)):
+                    if 0 <= px < W and 0 <= py < H:
+                        buf[py, px] = v
+    return buf
+
+
 def build():
+    """Liste de (image, durée ms, nom du plan)."""
     frames = []
     rng = np.random.default_rng(11)
+    shot = ["boot"]
 
     def add(f, ms=FPS_MS, shake=(0, 0)):
         if shake != (0, 0):
             f = shift(f, shake[1], shake[0], False)
-        frames.append((f.copy(), ms))
+        frames.append((f.copy(), ms, shot[0]))
 
     black = np.zeros((H, W), dtype=bool)
 
-    # ---- 0. allumage : un point, une ligne, de la neige, le noir
-    add(black, 200)
+    # ---- 0. DÉMARRAGE : point, ligne, neige légère, invite de commande
+    add(black, 250)
     for wdt in (2, 20, 70, 128):
         f = black.copy()
         f[32, 64 - wdt // 2:64 + wdt // 2] = True
         add(f, 35)
     for hh in (6, 32):
         f = black.copy()
-        f[32 - hh:32 + hh, :] = rng.random((2 * hh, W)) < 0.45     # neige
+        f[32 - hh:32 + hh, :] = rng.random((2 * hh, W)) < 0.18       # neige (peu dense : pas de flash)
         add(f, 40)
-    add(black, 160)
+    add(black, 120)
+    lines = ["> BOOT CARD_OS", "> SCAN PROFILE", "> TARGET LOCKED"]
+    for li, line in enumerate(lines):
+        for n in range(2, len(line) + 1, 2):
+            f = black.copy()
+            for lj in range(li):
+                text(f, 4, 6 + lj * 11, lines[lj], True)
+            text(f, 4, 6 + li * 11, line[:n] + "_", True)
+            add(f, 30)
+        if li == 1:                                                   # barre de progression
+            for p in range(0, 101, 20):
+                g = f.copy()
+                g[48:52, 4:124] = False
+                g[48, 4:124] = g[51, 4:124] = True
+                g[48:52, 4] = g[48:52, 123] = True
+                g[49:51, 5:5 + int(118 * p / 100)] = True
+                text(g, 4, 55, f"{p}%" if p < 100 else "OK", True)
+                add(g, 60)
+    f = black.copy()
+    for lj, line in enumerate(lines):
+        text(f, 4, 6 + lj * 11, line, True)
+    add(f, 380)
+    for k in range(4):                                                # l'interface s'efface en trame
+        add(f & (bayer() >= (k + 1) / 4), 40)
 
     # ---- PLAN 1 (large, de profil) : il fonce depuis la droite et dérape
-    S1 = 1.08                                    # personnage sur toute la hauteur de l'écran
-    for _ in range(3):
+    shot[0] = "1 course + dérapage"
+    S1 = 1.08
+    for _ in range(4):
         add(speed_lines(black, rng, 8))
     x, ghosts, p = W + 20.0, [], 0.0
     stop_x = 64.0
@@ -553,20 +634,20 @@ def build():
         f = speed_lines(black, rng)
         fig = Figure(x, -pi / 2, scale=S1)
         parts, head, _ = build_pose(walk=p, amp=1.0, run=True)
-        for lvl, g in zip((0.45, 0.25, 0.12), ghosts[::-1]):     # images rémanentes
+        for lvl, g in zip((0.45, 0.25, 0.12), ghosts[::-1]):
             put_figure(f, *g, level=lvl)
         put_figure(f, fig, parts, head)
         add(f)
         ghosts = (ghosts + [(fig, parts, head)])[-3:]
-        x -= 10.0
-        p += 2 * pi / 7
+        x -= 8.0
+        p += 2 * pi / 8
 
     dust = []
-    n, x0 = 9, x
+    n, x0 = 12, x
     for k in range(1, n + 1):
         t = k / n
         x = lerp(x0, stop_x, 1 - (1 - t) ** 3)
-        pose = mix_pose(SKID, READY, ease((t - 0.6) / 0.4)) if t > 0.6 else SKID
+        pose = mix_pose(SKID, READY, ease((t - 0.65) / 0.35)) if t > 0.65 else SKID
         fig = Figure(x, -pi / 2, scale=S1)
         parts, head, _ = build_pose(pose)
         f = black.copy()
@@ -574,85 +655,96 @@ def build():
             for g, lvl in zip(ghosts[::-1], (0.3, 0.15)):
                 put_figure(f, *g, level=lvl)
             ghosts = ghosts[1:]
-        if k < 7:
+        if k < 8:
             for _ in range(4):
                 dust.append([x + 4 + rng.random() * 6, 62.0, 0.8 + rng.random() * 1.8, -0.7 - rng.random() * 1.3, 0])
         for d in dust:
             d[0] += d[2]; d[1] += d[3]; d[3] += 0.25; d[4] += 1
-            if d[4] < 8 and 0 <= int(d[0]) < W - 1 and 0 <= int(d[1]) < H:
+            if d[4] < 9 and 0 <= int(d[0]) < W - 1 and 0 <= int(d[1]) < H:
                 f[int(d[1]), int(d[0])] = True
                 if d[4] < 3:
                     f[int(d[1]), int(d[0]) + 1] = True
-        dust = [d for d in dust if d[4] < 8]
+        dust = [d for d in dust if d[4] < 9]
         put_figure(f, fig, parts, head)
-        add(f, 45, shake=((1, -1, 1, 0)[k % 4] if k < 5 else 0, 0))
-    add(f, 120)
+        add(f, 45 if k < 4 else 60, shake=((1, -1, 1, 0)[k % 4] if k < 5 else 0, 0))
+    add(f, 450)                                                       # respiration : il s'immobilise
 
-    # ---- PLAN 2 (gros plan, de face) : il tourne la tête vers nous, les yeux s'allument
+    # ---- PLAN 2 (gros plan) : il tourne la tête, les yeux s'allument, la visée le verrouille
+    shot[0] = "2 gros plan, yeux"
     parts, head, _ = build_pose(READY)
-    for k in range(6):                           # lent travelling avant pendant le demi-tour
-        t = k / 5
-        fig = Figure(64, lerp(-1.2, 0, ease(t)), scale=lerp(2.5, 2.8, t)).centered_on(head, 64, 31)
-        add(put_figure(black.copy(), fig, parts, head, eyes="off"), 50)
-    fig = Figure(64, 0.0, scale=2.9).centered_on(head, 64, 31)
+    for k in range(10):
+        t = k / 9
+        fig = Figure(64, lerp(-1.3, 0, ease(t)), scale=lerp(2.4, 2.8, t)).centered_on(head, 64, 31)
+        add(put_figure(black.copy(), fig, parts, head, eyes="off"), 55)
+    fig = Figure(64, 0.0, scale=2.85).centered_on(head, 64, 31)
     dark = put_figure(black.copy(), fig, parts, head, eyes="off")
-    add(dark, 220)
+    add(dark, 550)                                                    # suspense : orbites vides
     lit = put_figure(black.copy(), fig, parts, head)
     eyes = eye_points(fig, head)
-    for size in (3, 7):
+    add(lit, 120)
+    for size in (3, 6, 9):
         f = lit.copy()
         for ex, ey, _ in eyes:
             sparkle(f, int(ex), int(ey), size)
-        add(f, 45)
-    f = focus_lines(black, 64, 31, 40, rng, 30)
-    f[lit | dark] = False
+        add(f, 50)
+    f = focus_lines(black, 64, 31, 42, rng, 18)
+    f[lit] = False
     f |= lit
     for ex, ey, _ in eyes:
         sparkle(f, int(ex), int(ey), 12)
-    add(~f, 60)                                  # image d'impact inversée
-    for _ in range(3):
-        f = focus_lines(black, 64, 31, 40, rng, 30)
-        fig2 = Figure(64, 0.0, scale=3.1).centered_on(head, 64, 31)
-        add(put_figure(f, fig2, parts, head), 60)
+    add(~f, 70)                                                       # un seul flash inversé
+    hx, hy, _ = fig.project(head)
+    for k in range(7):                                                # la visée se resserre sur la tête
+        t = ease(k / 6)
+        fig2 = Figure(64, 0.0, scale=lerp(2.85, 3.05, k / 6)).centered_on(head, 64, 31)
+        f = focus_lines(black, 64, 31, 44, rng, 16)
+        put_figure(f, fig2, parts, head)
+        reticle(f, hx, hy - 1, lerp(60, 21, t), lerp(31, 24, t), 5)
+        add(f, 60)
+    text(f, 4, 2, "LOCK", True)
+    add(f, 500)
 
     # ---- PLAN 3 (vue de dessus, la caméra descend) : il arme et lance la carte
-    def overhead(t):
-        return Figure(64, 0.0, pitch=lerp(1.15, 0.8, t), scale=1.55).centered_on(v3(0, 26, 2), 64, 31)
+    shot[0] = "3 vue de dessus, lancer"
 
-    for k in range(1, 9):
-        t = ease(k / 8)
+    def overhead(t):
+        return Figure(64, 0.0, pitch=lerp(1.2, 0.8, t), scale=1.55).centered_on(v3(0, 26, 2), 64, 31)
+
+    for k in range(1, 15):
+        t = ease(k / 14)
         pose = mix_pose(READY, WINDUP, t)
-        figk = overhead(k / 12)
+        figk = overhead(k / 18)
         figk = Figure(figk.cx, lerp(0, -0.4, t), figk.pitch, figk.scale, figk.cy)
         parts, head, hand = build_pose(pose)
         f = spotlight(black.copy(), figk)
         put_figure(f, figk, parts, head)
-        if k >= 4:                                # la carte apparaît entre les doigts
+        if k >= 6:
             f = draw_card3d(f, figk, hand + v3(0, 1.5, 0), 8, 5.5, 0.5)
-        add(f, 50 if k < 8 else 160)
+        add(f, 55)
+    add(f, 380)                                                       # tension avant le lancer
     wx, wy, _ = figk.project(hand)
 
-    for k, t in enumerate((0.5, 1.0)):            # LANCER
+    for k, (t, ms) in enumerate(((0.35, 110), (0.7, 110), (1.0, 60))):    # LANCER au ralenti puis net
         pose = mix_pose(WINDUP, THROW, t)
-        base = overhead((9 + k) / 12)
+        base = overhead((15 + k) / 18)
         figk = Figure(base.cx, lerp(-0.4, 0.4, t), base.pitch, base.scale, base.cy)
         parts, head, hand = build_pose(pose)
         f = spotlight(black.copy(), figk)
         hx, hy, _ = figk.project(hand)
         img = Image.fromarray(f.astype(np.uint8) * 255)
         dr = ImageDraw.Draw(img)
-        for o in (-4, -1, 2):                     # traînée du geste
+        for o in (-4, -1, 2):
             dr.line([(wx, wy + o), ((wx + hx) / 2 + 6, (wy + hy) / 2 + o), (hx, hy + o)], fill=255)
         f = np.array(img) > 127
         put_figure(f, figk, parts, head)
-        add(f, 40)
+        add(f, ms)
     throw = (figk, parts, head)
     release = hand + v3(0, 1.5, 0)
     trail = []
-    for k in range(1, 10):                        # la carte file vers le bas de l'écran en tournoyant
-        t = k / 9
+    for k in range(1, 12):
+        t = k / 11
         c = release + v3(6 * t, 10 * t, 42 * t * t)
-        spin = 0.5 + 9 * t
+        spin = 0.5 + 10 * t
         f = spotlight(black.copy(), throw[0])
         put_figure(f, *throw)
         for tc, ts in trail[-2:]:
@@ -661,66 +753,77 @@ def build():
         if k == 1:
             f = burst(f, *throw[0].project(release)[:2], rng, 10)
         trail.append((c, spin))
-        add(f, 40)
+        add(f, 45)
 
-    # ---- PLAN 4 (de face, caméra = cible) : la carte arrive droit sur l'écran
+    # ---- PLAN 4 (de face) : la carte arrive de loin, droit sur l'écran
+    shot[0] = "4 la carte arrive"
     trail = []
-    n = 10
+    n = 18
     for k in range(1, n + 1):
         t = k / n
-        e = t ** 1.6
+        e = t ** 2.2                                                  # lente au loin, puis fonce
         cw, chh = 5 * (150 / 5) ** e, 3.2 * (78 / 3.2) ** e
-        cx, cy = lerp(70, 64, t), lerp(26, 32, t)
-        rot, flip = 4 * pi * (1 - t) ** 2, 4 * pi * ease(t)
-        f = focus_lines(black, cx, cy, 14 + 30 * t, rng, 24)
+        cx, cy = lerp(72, 64, t) + 3 * sin(3 * t), lerp(24, 32, t)
+        rot, flip = 5 * pi * (1 - t) ** 2, 6 * pi * ease(t)
+        f = focus_lines(black, cx, cy, 14 + 30 * t, rng, 14 + int(8 * t))
         for (tx, ty, tw, th, tr, tf), lvl in zip(trail[-2:], (0.25, 0.5)):
             f |= draw_card(black.copy(), tx, ty, tw, th, tr, tf) & (bayer() < lvl)
         f = draw_card(f, cx, cy, cw, chh, rot, flip)
         trail.append((cx, cy, cw, chh, rot, flip))
-        add(f, 40 if t < 0.7 else 30)
+        add(f, 50 if t < 0.6 else 35)
 
-    # ---- IMPACT : écran blanc, éclat noir, secousse
-    white = np.ones((H, W), dtype=bool)
-    add(white, 40)
-    add(burst(black, 64, 32, rng, 26), 50)
-    add(~burst(black, 64, 32, rng, 18), 50, shake=(2, 1))
-    add(white, 40, shake=(-2, 0))
-    f = white.copy(); f[::2, :] = False
-    add(f, 35)
-    add(white, 60)
+    # ---- IMPACT : la carte plaque l'écran (un seul passage au blanc), éclat et secousse
+    shot[0] = "5 impact + numérisation"
+    card = draw_card(black.copy(), 64, 32, 150, 78, 0, 0)
+    for dx, dy in ((3, 2), (-2, -1), (1, 1)):
+        add(card & ~burst(black, 64, 32, rng, 14), 45, shake=(dx, dy))
+    add(card, 300)
 
-    # ---- QR : les modules tombent en place (repères d'abord), balayage, textes
+    # ---- la carte se numérise : ses traits se décomposent en pixels qui deviennent le QR
+    src = np.argwhere(~card[2:-2, 2:-2]) + 2
     mods = list(zip(*np.nonzero(QR)))
-    start_at, fall = {}, 4
-    for r, c in mods:
-        start_at[(r, c)] = rng.integers(0, 3) if in_finder(r, c) else 3 + c * 0.35 + rng.random() * 4
-    end = int(max(start_at.values())) + fall + 1
-    for fr in range(end):
-        f = white.copy()
-        for (r, c), s0 in start_at.items():
-            t = (fr - s0) / fall
-            if t <= 0:
-                continue
-            ty = QR_Y + r * QR_M
-            module(f, r, c, ty if t >= 1 else lerp(-QR_M - 2, ty, t * t))
-        add(f, 30, shake=(1, 0) if fr == 2 + fall else (0, 0))
+    order = rng.permutation(len(mods))
+    beam_frames = 8
+    for k in range(beam_frames):                                      # faisceau de numérisation
+        f = card.copy()
+        y = int((k + 1) / beam_frames * H)
+        f[max(y - 2, 0):y, :] = False
+        f[:max(y - 2, 0), :] &= (bayer()[:max(y - 2, 0), :] < 0.95)   # zone numérisée : grain
+        add(f, 35)
+    parts_px = []
+    for i, (r, c) in enumerate(mods):
+        sy, sx = src[order[i] % len(src)]
+        parts_px.append((sx, sy, QR_X + c * QR_M, QR_Y + r * QR_M, 2 + sy / H * 6 + rng.random() * 4))
+    steps = 22
+    for k in range(steps + 1):
+        f = np.ones((H, W), dtype=bool)
+        for sx, sy, tx, ty, d0 in parts_px:
+            t = ease((k - d0) / 9)
+            x = int(round(lerp(sx, tx, t)))
+            y = int(round(lerp(sy, ty, t) - 10 * sin(pi * t)))       # petit saut en arc
+            f[max(y, 0):max(y + QR_M, 0), max(x, 0):max(x + QR_M, 0)] = False
+        add(f, 35)
 
+    # ---- QR : balayage de lecture puis textes
+    shot[0] = "6 QR + textes"
+    white = np.ones((H, W), dtype=bool)
     qr_only = white.copy()
     for r, c in mods:
         module(qr_only, r, c)
-    for y in range(QR_Y - 2, QR_Y + QR_N * QR_M + 2, 8):
+    add(qr_only, 200)
+    for y in range(QR_Y - 2, QR_Y + QR_N * QR_M + 2, 6):
         f = qr_only.copy()
         f[y:y + 2, QR_X - 3:QR_X + QR_N * QR_M + 3] ^= True
-        add(f, 28)
+        add(f, 30)
     for s in ("S", "SC", "SCA", "SCAN"):
-        f = qr_only.copy(); text(f, 6, 21, s, False); add(f, 40)
+        f = qr_only.copy(); text(f, 6, 21, s, False); add(f, 50)
     for s in ("M", "ME"):
-        f = qr_only.copy(); text(f, 6, 21, "SCAN", False); text(f, 12, 33, s, False); add(f, 40)
+        f = qr_only.copy(); text(f, 6, 21, "SCAN", False); text(f, 12, 33, s, False); add(f, 50)
     f = qr_only.copy(); text(f, 6, 21, "SCAN", False); text(f, 12, 33, "ME", False)
     sparkle(f, LOGO_X + 7, LOGO_Y + 7, 3, False)
-    add(f, 60)
+    add(f, 80)
 
-    add(qr_final(), QR_HOLD_MS)
+    frames.append((qr_final(), QR_HOLD_MS, "QR fixe"))
     return frames
 
 
@@ -783,7 +886,7 @@ def write_header(frames, path):
 
 
 def main():
-    frames = build()
+    frames = [(f, ms) for f, ms, _ in build()]
     (ROOT / "preview").mkdir(exist_ok=True)
     imgs = [oled_look(f) for f, _ in frames]
     imgs[0].save(ROOT / "preview" / "intro.gif", save_all=True, append_images=imgs[1:],
