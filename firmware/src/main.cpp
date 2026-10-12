@@ -31,18 +31,18 @@ static bool buttonPressed() {
   return false;
 }
 
-static void showFrame(uint8_t idx) {
+static void showFrame(uint16_t idx) {
   memcpy(u8g2.getBufferPtr(), INTRO_FRAMES[idx], 1024);
   u8g2.sendBuffer();
 }
 
 // Affiche une image et attend sa durée ; renvoie true si le bouton a été pressé.
 static bool showStep(uint16_t step) {
+  uint32_t t0 = millis();  // la durée inclut l'envoi I2C (~23 ms à 400 kHz)
   showFrame(INTRO_SEQ_FRAME[step]);
-  uint32_t t0 = millis();
   while (millis() - t0 < INTRO_SEQ_MS[step]) {
     if (buttonPressed()) return true;
-    delay(5);
+    delay(2);
   }
   return false;
 }
