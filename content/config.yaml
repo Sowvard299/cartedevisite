@@ -1,0 +1,18 @@
+# Une entrée par carte. `python tools/make_intro.py --unit N` génère l'animation de la carte N.
+# Texte affiché en majuscules ; les accents sont retirés (police écran 1 bit).
+# Limites (vérifiées à la génération) : nom ≤ 19 caractères, accroche ≤ 3 lignes de 19
+# (grande police) ou de 29 (petite police, choisie automatiquement si besoin),
+# école ≤ 19 caractères.
+defaults:
+  qr_hold_seconds: 10
+units:
+  - id: 1
+    name: "Nathan Le Fol"
+    tagline: "Entrepreneuriat Deeptech & Innovation"
+    school: "Mines Paris - PSL"
+    linkedin_url: "https://www.linkedin.com/in/nathan-le-fol-ab7b3b230"
+  # - id: 2
+  #   name: "..."
+  #   tagline: "..."
+  #   school: "..."          # école visée par cette carte
+  #   linkedin_url: "https://www.linkedin.com/in/..."

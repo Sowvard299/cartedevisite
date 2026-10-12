@@ -1,0 +1,17 @@
+Durée de l'animation : 13.8 s  (210 étapes)  + QR 10 s
+Durée d'image : min 30 ms, médiane 40 ms, max 1700 ms
+
+Plans :
+   0.00 s  boot                         1.74 s  mouvement moyen  2.4 %
+   1.74 s  1 course + dérapage          1.60 s  mouvement moyen  7.5 %
+   3.35 s  2 gros plan, yeux            2.99 s  mouvement moyen  9.0 %
+   6.33 s  3 vue de dessus, lancer      1.93 s  mouvement moyen  2.8 %
+   8.26 s  4 la carte arrive            0.78 s  mouvement moyen 16.5 %
+   9.04 s  5 impact + numérisation      0.28 s  mouvement moyen 21.7 %
+   9.32 s  5b la carte : nom, accroche  2.47 s  mouvement moyen  0.5 %
+  11.79 s  5c numérisation              1.08 s  mouvement moyen  6.8 %
+  12.88 s  6 QR + textes                0.91 s  mouvement moyen  2.0 %
+
+Flashes plein écran : 4 ; pire fenêtre d'1 s : 2 (OK)
+Respirations (≥ 400 ms sans mouvement) : 1 course + dérapage (510 ms), 2 gros plan, yeux (670 ms), 2 gros plan, yeux (745 ms), 3 vue de dessus, lancer (435 ms), 5b la carte : nom, accroche (1735 ms), 6 QR + textes (445 ms)
+Images très chargées (45–70 % de pixels allumés, fond noir) : 1

@@ -2,3 +2,4 @@ segno
 pillow
 numpy
 zxing-cpp
+pyyaml

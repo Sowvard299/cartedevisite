@@ -19,22 +19,28 @@ Scénario façon anime (~11 s, chaque plan nommé ; voir tools/audit_intro.py) :
 Au plus 2 flashes plein écran par seconde (WCAG 2.3.1 : 3 max).
 
 Sorties :
-  preview/intro.gif                      aperçu x4, rendu "pixels d'OLED", vraies durées
-  preview/intro_sheet.png                planche de toutes les images
-  preview/qr_128x64.png                  image finale (QR), taille réelle
+  preview/unit<N>_intro.gif              aperçu x4, rendu "pixels d'OLED", vraies durées
+  preview/unit<N>_intro_sheet.png        planche de toutes les images
+  preview/unit<N>_qr_128x64.png          image finale (QR), taille réelle
   firmware/src/assets/intro_frames.h     images au format buffer u8g2 (SSD1306)
 
-Usage : python tools/make_intro.py
+Usage : python tools/make_intro.py --unit N   (cartes décrites dans content/config.yaml)
 """
+import argparse
+import textwrap
+import unicodedata
 from math import cos, pi, sin
 from pathlib import Path
 
 import numpy as np
 import segno
+import yaml
 from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent.parent
-URL = "https://www.linkedin.com/in/nathan-le-fol-ab7b3b230"
+CONFIG = ROOT / "content" / "config.yaml"
+# Remplis par configure(unit) à partir de content/config.yaml
+UNIT = PROFILE = URL = None
 QR_HOLD_MS = 10_000
 W, H = 128, 64
 FPS_MS = 40             # 25 images/s ; un envoi I2C 400 kHz prend ~23 ms
@@ -501,14 +507,82 @@ FONT["i"] = ["1", "0", "1", "1", "1", "1", "1"]
 FONT["n"] = ["00000", "00000", "11110", "10001", "10001", "10001", "10001"]
 
 
-def text(buf, x, y, s, v):
+# Petite police 3x5 pour les lignes longues (accroche, étiquettes)
+_SMALL = """
+A 010 101 111 101 101
+B 110 101 110 101 110
+C 011 100 100 100 011
+D 110 101 101 101 110
+E 111 100 110 100 111
+F 111 100 110 100 100
+G 011 100 101 101 011
+H 101 101 111 101 101
+I 111 010 010 010 111
+J 001 001 001 101 010
+K 101 101 110 101 101
+L 100 100 100 100 111
+M 101 111 111 101 101
+N 110 101 101 101 101
+O 010 101 101 101 010
+P 110 101 110 100 100
+Q 010 101 101 110 011
+R 110 101 110 101 101
+S 011 100 010 001 110
+T 111 010 010 010 010
+U 101 101 101 101 111
+V 101 101 101 101 010
+W 101 101 111 111 101
+X 101 101 010 101 101
+Y 101 101 010 010 010
+Z 111 001 010 100 111
+0 111 101 101 101 111
+1 010 110 010 010 111
+2 110 001 010 100 111
+3 110 001 010 001 110
+4 101 101 111 001 001
+5 111 100 110 001 110
+6 011 100 111 101 111
+7 111 001 010 010 010
+8 111 101 111 101 111
+9 111 101 111 001 110
+& 010 101 010 101 011
+- 000 000 111 000 000
+. 000 000 000 000 010
+: 000 010 000 010 000
+/ 001 001 010 100 100
+' 010 010 000 000 000
+"""
+SMALL = {line[0]: line[2:].split() for line in _SMALL.strip().splitlines()}
+SMALL[" "] = ["00"] * 5
+SMALL["M"] = ["10001", "11011", "10101", "10001", "10001"]   # lettres larges : plus lisibles
+SMALL["N"] = ["1001", "1101", "1011", "1001", "1001"]
+SMALL["W"] = ["10001", "10001", "10101", "11011", "10001"]
+FONT["&"] = ["01100", "10010", "10100", "01000", "10101", "10010", "01101"]
+FONT["'"] = ["00100", "00100", "00000", "00000", "00000", "00000", "00000"]
+
+
+def text(buf, x, y, s, v, font=None, bold=False):
+    """Écrit s (déjà en majuscules) ; bold = chaque glyphe doublé d'1 px vers la droite."""
+    font = font or FONT
     for ch in s:
-        g = FONT[ch]
+        g = font[ch]
         for r, row in enumerate(g):
             for c, bit in enumerate(row):
-                if bit == "1" and 0 <= y + r < H and 0 <= x + c < W:
-                    buf[y + r, x + c] = v
-        x += len(g[0]) + 1
+                for dx in ((0, 1) if bold else (0,)):
+                    if bit == "1" and 0 <= y + r < H and 0 <= x + c + dx < W:
+                        buf[y + r, x + c + dx] = v
+        x += len(g[0]) + 1 + (1 if bold else 0)
+
+
+def text_width(s, font=None, bold=False):
+    font = font or FONT
+    return sum(len(font[ch][0]) + 1 + (1 if bold else 0) for ch in s) - 1
+
+
+def screen_text(s):
+    """Majuscules sans accents (la police n'a que A-Z, 0-9 et quelques signes)."""
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().upper()
+    return " ".join(s.split())
 
 
 def qr_matrix():
@@ -522,12 +596,49 @@ def qr_matrix():
     raise SystemExit("URL trop longue pour un QR v3 : raccourcir l'URL LinkedIn")
 
 
-QR = qr_matrix()
-QR_N = QR.shape[0]
 QR_M = 2
-QR_X = (W - QR_N * QR_M) // 2
-QR_Y = (H - QR_N * QR_M) // 2
-LOGO_X, LOGO_Y = QR_X + QR_N * QR_M + 10, 24
+QR = QR_N = QR_X = QR_Y = LOGO_X = None
+LOGO_Y = 24
+
+
+def configure(unit=1):
+    """Charge la carte `unit` de content/config.yaml et prépare QR + textes."""
+    global UNIT, PROFILE, URL, QR_HOLD_MS, QR, QR_N, QR_X, QR_Y, LOGO_X
+    cfg = yaml.safe_load(CONFIG.read_text())
+    entries = {u["id"]: u for u in cfg["units"]}
+    if unit not in entries:
+        raise SystemExit(f"carte {unit} absente de {CONFIG} (cartes : {sorted(entries)})")
+    u = {**cfg.get("defaults", {}), **entries[unit]}
+    UNIT, URL = unit, u["linkedin_url"]
+    QR_HOLD_MS = int(u.get("qr_hold_seconds", 10) * 1000)
+    name, school = screen_text(u["name"]), screen_text(u.get("school", ""))
+    tag = screen_text(u.get("tagline", ""))
+    tagline, tag_font = textwrap.wrap(tag, 19), "big"     # 5x7 si ça tient en 3 lignes, sinon 3x5
+    if len(tagline) > 3:
+        tagline, tag_font = textwrap.wrap(tag, 29), "small"
+    for i in range(len(tagline) - 1):                    # pas de "&" ou "-" en fin de ligne
+        head, _, last = tagline[i].rpartition(" ")
+        if last in ("&", "-", "X") and head:
+            tagline[i], tagline[i + 1] = head, f"{last} {tagline[i + 1]}"
+    problems = []
+    for label, s in (("nom", name), ("accroche", " ".join(tagline)), ("école", school)):
+        bad = sorted({ch for ch in s if ch not in FONT or ch not in SMALL})
+        if bad:
+            problems.append(f"{label} : caractères non affichables {bad}")
+    if text_width(name) > 116:
+        problems.append(f"nom trop long ({len(name)} car., 19 max)")
+    if len(tagline) > 3 or any(text_width(x, FONT if tag_font == "big" else SMALL) > 116 for x in tagline):
+        problems.append("accroche trop longue (3 lignes de 29 car. max)")
+    if text_width(school) > 116:
+        problems.append(f"école trop longue ({len(school)} car., 19 max)")
+    if problems:
+        raise SystemExit(f"carte {unit} : " + " ; ".join(problems))
+    PROFILE = {"name": name, "tagline": tagline, "tag_font": tag_font, "school": school}
+    QR = qr_matrix()
+    QR_N = QR.shape[0]
+    QR_X = (W - QR_N * QR_M) // 2
+    QR_Y = (H - QR_N * QR_M) // 2
+    LOGO_X = QR_X + QR_N * QR_M + 10
 
 
 def module(buf, r, c, y=None):
@@ -560,6 +671,41 @@ def in_finder(r, c):
     return (r < 8 and c < 8) or (r < 8 and c >= n - 8) or (r >= n - 8 and c < 8)
 
 
+
+
+def card_face(reveal=None):
+    """Face de la carte en plein écran : nom, accroche, école (reveal = nb de caractères tapés)."""
+    f = np.ones((H, W), dtype=bool)
+    f[2, 2:126] = f[61, 2:126] = False
+    f[2:62, 2] = f[2:62, 125] = False
+    P = PROFILE
+    items = [(P["name"], 6, 6, FONT, False)]
+    big = P["tag_font"] == "big"
+    items += [(line, 6, (19 + 9 * i) if big else (21 + 8 * i), FONT if big else SMALL, False)
+              for i, line in enumerate(P["tagline"])]
+    if P["school"]:
+        items.append((P["school"], 6, 50, FONT, False))
+    left = 10 ** 6 if reveal is None else reveal
+    for k, (s, x, y, font, bold) in enumerate(items):
+        shown = s[:max(int(left), 0)]
+        left -= len(s)
+        text(f, x, y, shown, False, font, bold)
+        if k == 0 and shown:                              # soulignement du nom
+            f[15, 6:6 + text_width(shown)] = False
+    if P["school"] and (reveal is None or left >= 0):
+        f[46, 6:40] = False                               # filet au-dessus de l'école
+    if text_width(P["name"]) < 100:                       # puce "deep tech" en haut à droite
+        f[6:15, 112:121] = False
+        f[8:13, 114:119] = True
+        f[10, 116] = False
+        for i in (114, 116, 118):
+            f[4:6, i] = f[15:17, i] = False
+    return f
+
+
+def n_chars():
+    P = PROFILE
+    return len(P["name"]) + sum(len(x) for x in P["tagline"]) + len(P["school"])
 
 
 # ================================================================ scénario
@@ -601,14 +747,14 @@ def build():
     add(black, 120)
     lines = ["> BOOT CARD_OS", "> SCAN PROFILE", "> TARGET LOCKED"]
     for li, line in enumerate(lines):
-        for n in range(2, len(line) + 1, 2):
+        for n in range(3, len(line) + 3, 3):
             f = black.copy()
             for lj in range(li):
                 text(f, 4, 6 + lj * 11, lines[lj], True)
             text(f, 4, 6 + li * 11, line[:n] + "_", True)
             add(f, 30)
         if li == 1:                                                   # barre de progression
-            for p in range(0, 101, 20):
+            for p in (0, 35, 70, 100):
                 g = f.copy()
                 g[48:52, 4:124] = False
                 g[48, 4:124] = g[51, 4:124] = True
@@ -619,7 +765,7 @@ def build():
     f = black.copy()
     for lj, line in enumerate(lines):
         text(f, 4, 6 + lj * 11, line, True)
-    add(f, 380)
+    add(f, 300)
     for k in range(4):                                                # l'interface s'efface en trame
         add(f & (bayer() >= (k + 1) / 4), 40)
 
@@ -702,7 +848,18 @@ def build():
         reticle(f, hx, hy - 1, lerp(60, 21, t), lerp(31, 24, t), 5)
         add(f, 60)
     text(f, 4, 2, "LOCK", True)
-    add(f, 500)
+    add(f, 250)
+    label = "ID " + PROFILE["name"]                                  # étiquette d'identification
+    for k in range(1, 5):
+        g = f.copy()
+        shown = label[:int(len(label) * k / 4)]
+        bw = text_width(label, SMALL) + 6
+        g[53:63, 2:2 + bw] = False
+        g[53, 2:2 + bw] = g[62, 2:2 + bw] = True
+        g[53:63, 2] = g[53:63, 1 + bw] = True
+        text(g, 5, 56, shown, True, SMALL)
+        add(g, 45)
+    add(g, 700)
 
     # ---- PLAN 3 (vue de dessus, la caméra descend) : il arme et lance la carte
     shot[0] = "3 vue de dessus, lancer"
@@ -774,10 +931,17 @@ def build():
 
     # ---- IMPACT : la carte plaque l'écran (un seul passage au blanc), éclat et secousse
     shot[0] = "5 impact + numérisation"
-    card = draw_card(black.copy(), 64, 32, 150, 78, 0, 0)
+    blank = card_face(0)
     for dx, dy in ((3, 2), (-2, -1), (1, 1)):
-        add(card & ~burst(black, 64, 32, rng, 14), 45, shake=(dx, dy))
-    add(card, 300)
+        add(blank & ~burst(black, 64, 32, rng, 14), 45, shake=(dx, dy))
+    add(blank, 150)
+    shot[0] = "5b la carte : nom, accroche"
+    total = n_chars()
+    for k in range(3, total + 3, 3):                                 # le texte se tape sur la carte
+        add(card_face(k), 35)
+    card = card_face()
+    add(card, 1700)                                                  # temps de lecture
+    shot[0] = "5c numérisation"
 
     # ---- la carte se numérise : ses traits se décomposent en pixels qui deviennent le QR
     src = np.argwhere(~card[2:-2, 2:-2]) + 2
@@ -858,7 +1022,7 @@ def write_header(frames, path):
         seq.append((index[key], ms))
     lines = [
         "// Généré par tools/make_intro.py — ne pas modifier à la main.",
-        f"// URL : {URL}",
+        f"// Carte {UNIT} : {PROFILE['name']} — URL : {URL}",
         "#pragma once",
         "#include <stdint.h>",
         "",
@@ -886,10 +1050,15 @@ def write_header(frames, path):
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--unit", type=int, default=1, help="numéro de carte dans content/config.yaml")
+    unit = ap.parse_args().unit
+    configure(unit)
     frames = [(f, ms) for f, ms, _ in build()]
-    (ROOT / "preview").mkdir(exist_ok=True)
+    out = ROOT / "preview"
+    out.mkdir(exist_ok=True)
     imgs = [oled_look(f) for f, _ in frames]
-    imgs[0].save(ROOT / "preview" / "intro.gif", save_all=True, append_images=imgs[1:],
+    imgs[0].save(out / f"unit{unit}_intro.gif", save_all=True, append_images=imgs[1:],
                  duration=[ms for _, ms in frames], loop=0, optimize=False)
 
     cols = 8
@@ -898,13 +1067,14 @@ def main():
     for i, (f, _) in enumerate(frames):
         im = Image.fromarray((f * 255).astype(np.uint8)).resize((W * 2, H * 2), Image.NEAREST)
         sheet.paste(im, ((i % cols) * (W * 2 + 4) + 2, (i // cols) * (H * 2 + 4) + 2))
-    sheet.save(ROOT / "preview" / "intro_sheet.png")
-    Image.fromarray((frames[-1][0] * 255).astype(np.uint8)).save(ROOT / "preview" / "qr_128x64.png")
+    sheet.save(out / f"unit{unit}_intro_sheet.png")
+    Image.fromarray((frames[-1][0] * 255).astype(np.uint8)).save(out / f"unit{unit}_qr_128x64.png")
 
     hdr = ROOT / "firmware" / "src" / "assets" / "intro_frames.h"
     hdr.parent.mkdir(parents=True, exist_ok=True)
     u, s = write_header(frames, hdr)
     anim_ms = sum(ms for _, ms in frames[:-1])
+    print(f"carte {unit} : {PROFILE['name']} | {' / '.join(PROFILE['tagline'])} | {PROFILE['school']}")
     print(f"{s} étapes, {u} images uniques ({u} Ko en flash), animation {anim_ms / 1000:.1f} s "
           f"+ QR {QR_HOLD_MS / 1000:.0f} s")
 

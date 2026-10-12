@@ -6,7 +6,7 @@ remplissage de l'écran, et flashes plein écran. Le seuil des flashes suit la
 règle WCAG 2.3.1 (au plus 3 flashes par seconde) : une démo publique ne doit
 pas risquer de déclencher une crise photosensible.
 
-Usage : python tools/audit_intro.py
+Usage : python tools/audit_intro.py [N]   (N = numéro de carte, 1 par défaut)
 """
 import sys
 from pathlib import Path
@@ -15,6 +15,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import make_intro as m  # noqa: E402
+
+m.configure(int(sys.argv[1]) if len(sys.argv) > 1 else 1)
 
 
 def main():
