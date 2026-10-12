@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Génère l'animation de la carte (128x64, 1 bit, pixel natif).
 
-Le personnage est un petit pantin 3D (capsules et sphères) rendu en
-sur-échantillonnage, éclairé, puis tramé (Bayer 8x8) avec contour lumineux
-et traits intérieurs. Cela permet une vraie marche, un demi-tour fluide et
-un bras tendu en perspective.
+Le personnage est un mannequin blanc sans visage (tête en œuf, deux yeux
+ronds lumineux), construit en 3D (capsules + ellipsoïde), rendu en
+sur-échantillonnage, éclairé en aplats tramés (Bayer 8x8), avec contour
+lumineux et traits intérieurs.
 
-Scénario :
-  allumage façon tube cathodique -> arrivée en marchant depuis la droite
-  (poussière aux pas) -> demi-tour -> clin d'œil -> tend la carte (éclat) ->
-  la carte s'envole en tournant et remplit l'écran (le personnage se dissout)
-  -> flash + lignes de balayage -> les modules du QR tombent en place ->
-  balayage de lecture -> textes -> QR fixe QR_HOLD_MS.
+Scénario façon anime :
+  allumage tube cathodique -> traits de vitesse, il fonce depuis la droite
+  (images rémanentes) -> dérapage (poussière, secousse) -> demi-tour éclair
+  -> les yeux s'allument (image d'impact inversée) -> il arme son lancer
+  (lignes de concentration) -> lance la carte qui tournoie vers l'écran ->
+  impact (éclat, secousse) -> les modules du QR tombent en place ->
+  balayage -> textes -> QR fixe QR_HOLD_MS.
 
 Sorties :
   preview/intro.gif                      aperçu x4, rendu "pixels d'OLED", vraies durées
@@ -65,95 +66,119 @@ def unit(v):
     return v / np.linalg.norm(v)
 
 
+
+
 # ================================================================ personnage
+# Mannequin blanc : tête en œuf, deux yeux ronds lumineux, aucun autre détail.
 # Repère local : x = côté droit du personnage, y = vers le haut, z = vers l'avant.
 # yaw = 0 : face à l'écran ; yaw = -90° : de profil, tourné vers la gauche.
-SKIN, HAIR, JACKET, PANTS, SHOES = 1.5, 0.3, 0.9, 0.55, 0.22
 LIGHT = unit(v3(-0.55, -0.6, 0.6))      # repère écran (y vers le bas), lumière haut-gauche-avant
-G_BODY, G_HEAD, G_HAIR, G_LLEG, G_RLEG, G_LARM, G_RARM = range(7)
-THIGH, SHIN, UPPER, FORE = 9.5, 9.5, 8.0, 6.5
-HEAD_R = 7.0
-HIP_Y = 22.2       # hauteur des hanches debout
+G_BODY, G_HEAD, G_LLEG, G_RLEG, G_LARM, G_RARM = range(6)
+THIGH, SHIN, UPPER, FORE = 9.5, 9.5, 8.5, 7.5
+HEAD_RX, HEAD_RY, HEAD_RZ = 5.3, 6.8, 5.6
+HIP_Y = 22.2                            # hauteur des hanches debout
+
+# Poses clés (les angles sont en radians ; bras : tangage avant, écart, coude)
+STAND = dict(legs={-1: (0.0, 0.05), 1: (0.0, 0.05)},
+             arms={-1: (0.0, 0.12, 0.25), 1: (0.0, 0.12, 0.25)}, lean=0.0, spread=0.0)
+SKID = dict(legs={-1: (0.6, 0.55), 1: (-0.45, 0.35)},
+            arms={-1: (1.0, 0.5, 0.7), 1: (-0.9, 0.55, 0.3)}, lean=-0.32, spread=0.0)
+READY = dict(legs={-1: (0.05, 0.35), 1: (-0.05, 0.35)},
+             arms={-1: (0.25, 0.3, 0.6), 1: (0.25, 0.3, 0.6)}, lean=0.05, spread=0.2)
+WINDUP = dict(legs={-1: (0.15, 0.45), 1: (-0.2, 0.4)},
+              arms={-1: (1.25, 0.05, 0.15), 1: (-1.7, 0.75, 1.2)}, lean=-0.18, spread=0.22)
+THROW = dict(legs={-1: (-0.1, 0.4), 1: (0.25, 0.5)},
+             arms={-1: (-0.7, 0.45, 0.5), 1: (1.55, -0.3, 0.02)}, lean=0.28, spread=0.22)
 
 
-def jacket_shader(nl, t):
-    """Veste avec col en V (chemise claire) et cravate sombre sur le devant."""
-    tone = np.full(t.shape, JACKET)
-    front = nl[2] > 0.55
-    shirt = front & (np.abs(nl[0]) < np.clip((t - 0.45) * 0.9, 0, None))
-    tone[shirt] = 1.0
-    tie = front & (np.abs(nl[0]) < 0.09) & (t > 0.35)
-    tone[tie] = 0.0
-    return tone
+def mix_pose(a, b, t):
+    out = {}
+    for key in a:
+        if isinstance(a[key], dict):
+            out[key] = {s: tuple(lerp(x, y, t) for x, y in zip(a[key][s], b[key][s])) for s in a[key]}
+        else:
+            out[key] = lerp(a[key], b[key], t)
+    return out
 
 
-def flat(tone):
-    return lambda nl, t: np.full(t.shape, tone)
+def build_pose(P=None, walk=0.0, amp=0.0, run=False):
+    """Liste des primitives en coordonnées locales + tête + main droite.
 
-
-def build_pose(walk=0.0, amp=0.0, reach=0.0):
-    """Liste des parties (capsules) en coordonnées locales + infos tête/main."""
+    P : pose explicite (dict comme STAND) ; sinon cycle de marche/course (walk, amp).
+    """
     parts = []
 
-    def cap(a, b, r, shader, grp, rdep=None):
-        parts.append((a, b, r, r if rdep is None else rdep, shader, grp))
+    def cap(a, b, r, grp, rdep=None):
+        parts.append(("cap", a, b, r, r if rdep is None else rdep, grp))
 
-    # jambes, cuisse et tibia en FK dans le plan y-z
+    P = P or {}
+    spread, lean = P.get("spread", 0.0), P.get("lean", 0.0)
+    if not P:
+        lean = 0.32 * amp if run else 0.04 * amp
+
     legs = {}
     for sgn, grp in ((-1, G_LLEG), (1, G_RLEG)):
         q = walk + (0 if sgn < 0 else pi)
-        a = amp * 0.5 * sin(q)
-        k = amp * (0.12 + 0.95 * max(0.0, cos(q)) ** 1.5)
+        if "legs" in P:
+            a, k = P["legs"][sgn]
+        elif run:
+            a = amp * 0.75 * sin(q)
+            k = amp * (0.25 + 1.5 * max(0.0, cos(q)) ** 1.2)
+        else:
+            a = amp * 0.5 * sin(q)
+            k = amp * (0.12 + 0.95 * max(0.0, cos(q)) ** 1.5)
         hip = v3(sgn * 3.0, 0, 0)
-        knee = hip + THIGH * v3(0, -cos(a), sin(a))
-        ankle = knee + SHIN * v3(0, -cos(a - k), sin(a - k))
-        legs[sgn] = (hip, knee, ankle, grp, q)
-    # le pied le plus bas touche le sol (rebond naturel du corps)
-    hip_y = 0.3 + 3.1 - min(legs[s][2][1] for s in legs)
+        knee = hip + THIGH * unit(v3(sgn * spread, -cos(a), sin(a)))
+        ankle = knee + SHIN * unit(v3(sgn * spread * 0.5, -cos(a - k), sin(a - k)))
+        legs[sgn] = (hip, knee, ankle, grp)
+    hip_y = 0.3 + 3.0 - min(l[2][1] for l in legs.values())   # le pied le plus bas touche le sol
     lift = v3(0, hip_y, 0)
-    leg_info = {}
-    for sgn, (hip, knee, ankle, grp, q) in legs.items():
+    for sgn, (hip, knee, ankle, grp) in legs.items():
         hip, knee, ankle = hip + lift, knee + lift, ankle + lift
-        cap(hip, knee, 2.7, flat(PANTS), grp)
-        cap(knee, ankle, 2.3, flat(PANTS), grp)
-        heel, toe = ankle + v3(0, -1.6, -1.2), ankle + v3(0, -1.6, 3.6)
-        cap(heel, toe, 1.5, flat(SHOES), grp)
-        leg_info[sgn] = (toe, q)
+        cap(hip, knee, 2.6, grp)
+        cap(knee, ankle, 2.1, grp)
+        cap(ankle + v3(0, -1.6, -1.0), ankle + v3(0, -1.6, 3.4), 1.4, grp)  # pied
 
-    dy = hip_y - HIP_Y
-    up = lambda x, y, z: v3(x, y + dy, z)
-    cap(up(-2.8, 22.8, 0), up(2.8, 22.8, 0), 3.4, flat(PANTS), G_BODY)       # bassin
-    cap(up(0, 26, 0), up(0, 33.5, 0), 7.0, jacket_shader, G_BODY, 4.2)       # torse
-    cap(up(0, 38, 0), up(0, 41, 0), 2.0, flat(SKIN), G_BODY)                 # cou
+    pivot = v3(0, hip_y, 0)
 
-    head = up(0, 47.6, 0.5)
-    cap(head, head, HEAD_R, flat(SKIN), G_HEAD)
-    cap(head + v3(0, -0.4, HEAD_R + 0.1), head + v3(0, -0.4, HEAD_R + 0.1), 0.9, flat(SKIN), G_HEAD)  # nez
-    for s in (-1, 1):
-        cap(head + v3(s * HEAD_R, -0.4, -0.3), head + v3(s * HEAD_R, -0.4, -0.3), 1.1, flat(SKIN), G_HEAD)
-    hair_c = head + v3(0, 2.0, -2.6)
-    cap(hair_c, hair_c, 7.6, flat(HAIR), G_HAIR)
+    def up(x, y, z):
+        """Point du haut du corps, incliné de `lean` autour des hanches."""
+        r = v3(x, y - HIP_Y, z)
+        return pivot + v3(r[0], r[1] * cos(lean) - r[2] * sin(lean), r[1] * sin(lean) + r[2] * cos(lean))
 
-    # bras : balancement opposé aux jambes ; bras droit (sgn=+1) tend la carte
+    cap(up(-2.6, 23.0, 0), up(2.6, 23.0, 0), 3.3, G_BODY)               # bassin
+    cap(up(0, 24.5, 0), up(0, 28.5, 0), 4.3, G_BODY, 3.2)               # taille
+    cap(up(0, 30.5, 0), up(0, 34.0, 0), 6.0, G_BODY, 3.8)               # poitrine
+    cap(up(-5.2, 36.0, 0), up(5.2, 36.0, 0), 2.5, G_BODY)               # épaules
+    cap(up(0, 37.5, 0), up(0, 41.0, 0), 1.7, G_BODY)                    # cou
+    head = up(0, 46.6, 0.3)
+    parts.append(("egg", head, None, None, None, G_HEAD))
+
     hand_r = None
     for sgn, grp in ((-1, G_LARM), (1, G_RARM)):
         q = walk + (0 if sgn < 0 else pi)
-        pitch = -amp * 0.55 * sin(q)
-        side, bend = sgn * 0.14, 0.3 + 0.4 * max(0.0, pitch)
-        if sgn == 1 and reach > 0:
-            r = ease(reach)
-            pitch, side, bend = lerp(pitch, 1.3, r), lerp(side, -0.42, r), lerp(bend, 0.12, r)
-        sh = up(sgn * 7.6, 36.2, 0)
-        elbow = sh + UPPER * unit(v3(side, -cos(pitch), sin(pitch)))
+        if "arms" in P:
+            pitch, side, bend = P["arms"][sgn]
+        elif run:
+            pitch, side, bend = -amp * 0.85 * sin(q), 0.12, 1.4
+        else:
+            pitch = -amp * 0.55 * sin(q)
+            side, bend = 0.12, 0.3 + 0.4 * max(0.0, pitch)
+        sh = up(sgn * 7.0, 36.0, 0)
+        d1 = unit(v3(sgn * side, -cos(pitch), sin(pitch)))
+        d1 = up(*(d1 + v3(0, HIP_Y, 0))) - pivot                       # suit l'inclinaison
+        elbow = sh + UPPER * d1
         fp = pitch + bend
-        wrist = elbow + FORE * unit(v3(side * 0.5, -cos(fp), sin(fp)))
-        hand = wrist + 1.2 * unit(wrist - elbow)
-        cap(sh, elbow, 2.1, flat(JACKET), grp)
-        cap(elbow, wrist, 1.8, flat(JACKET), grp)
-        cap(hand, hand, 1.9, flat(SKIN), grp)
+        d2 = unit(v3(sgn * side * 0.5, -cos(fp), sin(fp)))
+        d2 = up(*(d2 + v3(0, HIP_Y, 0))) - pivot
+        wrist = elbow + FORE * d2
+        hand = wrist + 1.3 * d2
+        cap(sh, elbow, 1.9, grp)
+        cap(elbow, wrist, 1.6, grp)
+        cap(hand, hand, 1.9, grp)
         if sgn == 1:
             hand_r = hand
-    return parts, head, hand_r, leg_info
+    return parts, head, hand_r
 
 
 class Figure:
@@ -178,48 +203,64 @@ def render_figure(fig, parts):
     tone = np.zeros((hs, ws))
     depth = np.full((hs, ws), -1e9)
     grp = np.full((hs, ws), -1)
-    for a, b, rl, rd, shader, g in parts:
+    for kind, a, b, rl, rd, g in parts:
         ax, ay, az = fig.project(a)
-        bx, by, bz = fig.project(b)
-        r = np.hypot(rl * fig.c, rd * fig.s) if rl != rd else rl
-        x0 = int(max((min(ax, bx) - r - 1) * SS, 0)); x1 = int(min((max(ax, bx) + r + 1) * SS, ws))
-        y0 = int(max((min(ay, by) - r - 1) * SS, 0)); y1 = int(min((max(ay, by) + r + 1) * SS, hs))
-        if x0 >= x1 or y0 >= y1:
-            continue
-        yy, xx = np.mgrid[y0:y1, x0:x1]
-        px, py = (xx + 0.5) / SS, (yy + 0.5) / SS
-        dx, dy = bx - ax, by - ay
-        L2 = dx * dx + dy * dy
-        t = np.clip(((px - ax) * dx + (py - ay) * dy) / L2, 0, 1) if L2 > 1e-9 else np.zeros_like(px)
-        qx, qy = px - (ax + t * dx), py - (ay + t * dy)
-        d2 = qx * qx + qy * qy
-        inside = d2 < r * r
-        h = np.sqrt(np.clip(1 - d2 / (r * r), 0, 1))
-        z = az + t * (bz - az) + r * h
+        if kind == "egg":
+            # ellipsoïde de révolution (axe vertical) : sa projection ne dépend pas du yaw
+            rx, ry = HEAD_RX * 1.12, HEAD_RY
+            x0, x1 = int(max((ax - rx - 1) * SS, 0)), int(min((ax + rx + 1) * SS, ws))
+            y0, y1 = int(max((ay - ry - 1) * SS, 0)), int(min((ay + ry + 1) * SS, hs))
+            if x0 >= x1 or y0 >= y1:
+                continue
+            yy, xx = np.mgrid[y0:y1, x0:x1]
+            v = ((yy + 0.5) / SS - ay) / HEAD_RY
+            rxv = HEAD_RX * (1 - 0.12 * v)                 # plus large en haut, menton plus fin
+            u = ((xx + 0.5) / SS - ax) / rxv
+            d2 = u * u + v * v
+            inside = d2 < 1
+            h = np.sqrt(np.clip(1 - d2, 0, 1))
+            z = az + HEAD_RZ * h
+            n = np.stack([u / rxv, v / HEAD_RY, h / HEAD_RZ])
+            n /= np.linalg.norm(n, axis=0)
+            nx, ny, nz = n
+        else:
+            bx, by, bz = fig.project(b)
+            r = np.hypot(rl * fig.c, rd * fig.s) if rl != rd else rl
+            x0 = int(max((min(ax, bx) - r - 1) * SS, 0)); x1 = int(min((max(ax, bx) + r + 1) * SS, ws))
+            y0 = int(max((min(ay, by) - r - 1) * SS, 0)); y1 = int(min((max(ay, by) + r + 1) * SS, hs))
+            if x0 >= x1 or y0 >= y1:
+                continue
+            yy, xx = np.mgrid[y0:y1, x0:x1]
+            px, py = (xx + 0.5) / SS, (yy + 0.5) / SS
+            dx, dy = bx - ax, by - ay
+            L2 = dx * dx + dy * dy
+            t = np.clip(((px - ax) * dx + (py - ay) * dy) / L2, 0, 1) if L2 > 1e-9 else np.zeros_like(px)
+            qx, qy = px - (ax + t * dx), py - (ay + t * dy)
+            d2 = qx * qx + qy * qy
+            inside = d2 < r * r
+            h = np.sqrt(np.clip(1 - d2 / (r * r), 0, 1))
+            z = az + t * (bz - az) + r * h
+            nx, ny, nz = qx / r, qy / r, h
         win = inside & (z > depth[y0:y1, x0:x1])
         if not win.any():
             continue
-        nx, ny, nz = qx / r, qy / r, h
-        nl = np.stack([nx * fig.c - nz * fig.s, -ny, nx * fig.s + nz * fig.c])  # normale locale
-        base = shader(nl, t)
         lit = np.clip(nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2], 0, 1)
-        shade = base * (0.45 + 0.75 * lit)
-        shade = np.select([shade < 0.12, shade < 0.32, shade < 0.62], [0.0, 0.25, 0.5], 1.0)  # aplats
+        shade = 0.38 + 0.85 * lit
+        shade = np.select([shade < 0.42, shade < 0.62], [0.25, 0.5], 1.0)   # aplats (cel-shading)
         tone[y0:y1, x0:x1][win] = shade[win]
         depth[y0:y1, x0:x1][win] = z[win]
         grp[y0:y1, x0:x1][win] = g
 
     # réduction à la résolution écran
-    cov = (grp >= 0).reshape(H, SS, W, SS).mean(axis=(1, 3))
-    tsum = np.where(grp >= 0, tone, 0).reshape(H, SS, W, SS).sum(axis=(1, 3))
     cnt = (grp >= 0).reshape(H, SS, W, SS).sum(axis=(1, 3))
+    tsum = np.where(grp >= 0, tone, 0).reshape(H, SS, W, SS).sum(axis=(1, 3))
     tone_n = np.where(cnt > 0, tsum / np.maximum(cnt, 1), 0)
     blk_d = depth.reshape(H, SS, W, SS).transpose(0, 2, 1, 3).reshape(H, W, SS * SS)
     blk_g = grp.reshape(H, SS, W, SS).transpose(0, 2, 1, 3).reshape(H, W, SS * SS)
     idx = blk_d.argmax(axis=2)
     depth_n = np.take_along_axis(blk_d, idx[..., None], 2)[..., 0]
     grp_n = np.take_along_axis(blk_g, idx[..., None], 2)[..., 0]
-    return tone_n, cov >= 0.45, grp_n, depth_n
+    return tone_n, cnt >= SS * SS * 0.45, grp_n, depth_n
 
 
 def shift(a, dy, dx, fill):
@@ -230,43 +271,44 @@ def shift(a, dy, dx, fill):
     return out
 
 
-def ink_figure(fig, parts, head, eyes="open", smile=False):
-    """Tramage + contour lumineux + traits intérieurs + traits du visage."""
+def ink_figure(fig, parts, head, eyes="glow"):
+    """Tramage + contour lumineux + traits intérieurs + yeux."""
     tone, mask, grp, depth = render_figure(fig, parts)
     lit = mask & (tone > bayer(int(fig.cx)))
     for dy, dx in ((0, 1), (0, -1), (1, 0), (-1, 0)):
         m2, g2, d2 = shift(mask, dy, dx, False), shift(grp, dy, dx, -1), shift(depth, dy, dx, -1e9)
-        # trait sombre là où une partie plus proche (autre groupe) passe devant
-        lit &= ~(mask & m2 & (g2 != grp) & (d2 > depth + 0.8))
+        lit &= ~(mask & m2 & (g2 != grp) & (d2 > depth + 0.8))   # une partie plus proche passe devant
     rim = mask & ~(shift(mask, 0, 1, False) & shift(mask, 0, -1, False)
                    & shift(mask, 1, 0, False) & shift(mask, -1, 0, False))
     lit |= rim
-
-    def mark(p, v):
-        x, y, _ = fig.project(p)
-        x, y = int(np.floor(x)), int(np.floor(y))
-        if 0 <= x < W and 0 <= y < H:
-            lit[y, x] = v
-
-    for s in (-1, 1):
-        d = unit(v3(s * 0.4, 0.1, 0.91))
-        if fig.facing(d) > 0.12:
-            e = head + HEAD_R * d
-            if eyes == "open":
-                mark(e, False)
-                mark(e + v3(0, 1.0, 0), False)
-            else:                                       # yeux plissés ^ ^
-                mark(e + v3(0, 0.9, 0), False)
-                mark(e + v3(-0.9, 0, 0), False)
-                mark(e + v3(0.9, 0, 0), False)
-    for x in ((-0.22, 0, 0.22) if smile else (-0.1, 0.1)):
-        d = unit(v3(x, -0.42 + (0.07 if smile and x else 0), 0.9))
-        if fig.facing(d) > -0.05:
-            mark(head + HEAD_R * d, False)
+    for x, y, f in eye_points(fig, head):
+        if f > 0.55:                    # œil de face : rond sombre, pupille lumineuse
+            for ex, ey in ((-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1),
+                           (0, -2), (0, 2), (-2, 0), (2, 0)):
+                if 0 <= x + ex < W and 0 <= y + ey < H:
+                    lit[y + ey, x + ex] = False
+            if eyes == "glow":
+                lit[y, x] = True
+        elif f > 0.12:                  # œil de profil : fente
+            for ey in (-1, 0, 1):
+                if 0 <= y + ey < H and 0 <= x < W:
+                    lit[y + ey, x] = ey == 0 and eyes == "glow"
     return lit, mask
 
 
-# ================================================================ décor
+def eye_points(fig, head):
+    out = []
+    for s in (-1, 1):
+        d = unit(v3(s * 0.42, -0.05, 0.9))
+        f = fig.facing(d)
+        if f > 0.12:
+            p = head + v3(d[0] * HEAD_RX, d[1] * HEAD_RY, d[2] * HEAD_RZ)
+            x, y, _ = fig.project(p)
+            out.append((int(round(x)), int(round(y)), f))
+    return out
+
+
+# ================================================================ décor et effets
 def floor(buf, shadow_x=None):
     """Sol en perspective : rangées de points de plus en plus serrées."""
     for y, step, off in ((58, 8, 0), (60, 5, 2), (62, 3, 1), (63, 2, 0)):
@@ -277,16 +319,42 @@ def floor(buf, shadow_x=None):
         buf[sh] = False
 
 
-def compose(fig, parts, head, eyes="open", smile=False, fade=0.0):
-    buf = np.zeros((H, W), dtype=bool)
-    floor(buf, fig.cx)
-    lit, mask = ink_figure(fig, parts, head, eyes, smile)
-    if fade > 0:                       # dissolution tramée du personnage
-        keep = bayer() >= fade
-        lit &= keep
-        mask &= keep
-    buf[mask] = lit[mask]
-    return buf
+def speed_lines(buf, rng, n=14):
+    """Traits horizontaux de vitesse (le personnage file vers la gauche)."""
+    img = Image.fromarray(buf.astype(np.uint8) * 255)
+    d = ImageDraw.Draw(img)
+    for _ in range(n):
+        y = int(rng.integers(2, 57))
+        x = int(rng.integers(-20, W))
+        d.line([(x, y), (x + int(rng.integers(12, 46)), y)], fill=255)
+    return np.array(img) > 127
+
+
+def focus_lines(buf, cx, cy, r_in, rng, n=26):
+    """Lignes de concentration manga : triangles fins venant des bords vers le centre."""
+    img = Image.fromarray(buf.astype(np.uint8) * 255)
+    d = ImageDraw.Draw(img)
+    for _ in range(n):
+        a = rng.random() * 2 * pi
+        r0 = r_in + rng.random() * 14
+        w = 0.008 + rng.random() * 0.028
+        tip = (cx + r0 * cos(a), cy + r0 * sin(a) * 0.62)
+        b1 = (cx + 120 * cos(a - w), cy + 120 * sin(a - w) * 0.62)
+        b2 = (cx + 120 * cos(a + w), cy + 120 * sin(a + w) * 0.62)
+        d.polygon([tip, b1, b2], fill=255)
+    return np.array(img) > 127
+
+
+def burst(buf, cx, cy, rng, n=22, v=True):
+    """Éclat d'impact : rayons depuis un point."""
+    img = Image.fromarray(buf.astype(np.uint8) * 255)
+    d = ImageDraw.Draw(img)
+    for _ in range(n):
+        a = rng.random() * 2 * pi
+        r0, r1 = 6 + rng.random() * 10, 50 + rng.random() * 80
+        d.line([(cx + r0 * cos(a), cy + r0 * sin(a)), (cx + r1 * cos(a), cy + r1 * sin(a))],
+               fill=255 if v else 0, width=int(1 + rng.integers(0, 2)))
+    return np.array(img) > 127
 
 
 def sparkle(buf, x, y, size, v=True):
@@ -302,39 +370,45 @@ def sparkle(buf, x, y, size, v=True):
                     buf[y + e, x + d] = v
 
 
-# ================================================================ carte volante
-def draw_card(buf, cx, cy, w, h, angle):
-    """Carte en perspective, tournant autour de l'axe vertical."""
+def put_figure(buf, fig, parts, head, eyes="glow", level=1.0):
+    """Pose le personnage sur buf ; level < 1 = image fantôme tramée."""
+    lit, mask = ink_figure(fig, parts, head, eyes)
+    if level < 1:
+        keep = bayer() < level
+        buf |= lit & keep
+        return buf
+    buf[mask] = lit[mask]
+    return buf
+
+
+# ================================================================ carte
+def draw_card(buf, cx, cy, w, h, rot=0.0, flip=0.0):
+    """Carte tournant dans le plan (rot) et autour de son axe vertical (flip)."""
     img = Image.fromarray(buf.astype(np.uint8) * 255)
     d = ImageDraw.Draw(img)
-    F = 2.4 * max(w, 8)
+    cf = cos(flip)
 
     def P(u, v):
-        X, Z = u * w / 2 * cos(angle), u * w / 2 * sin(angle)
-        k = F / (F - Z)
-        return (cx + X * k, cy + v * h / 2 * k)
+        x, y = u * w / 2 * cf, v * h / 2
+        return (cx + x * cos(rot) - y * sin(rot), cy + x * sin(rot) + y * cos(rot))
 
     quad = [P(-1, -1), P(1, -1), P(1, 1), P(-1, 1)]
-    front = cos(angle) > 0
     lw = max(1, int(w / 45))
-    if front:
+    if cf > 0:
         d.polygon(quad, fill=255, outline=0)
-        d.line([P(-0.95, -0.95), P(0.95, -0.95), P(0.95, 0.95), P(-0.95, 0.95), P(-0.95, -0.95)],
-               fill=0, width=lw) if w > 30 else None
-        if abs(cos(angle)) > 0.3:
-            d.line([P(-0.75, -0.35), P(0.05, -0.35)], fill=0, width=lw)       # nom
-            d.line([P(-0.75, 0.15), P(-0.2, 0.15)], fill=0, width=lw)         # titre
+        if w * cf > 9:
+            d.line([P(-0.75, -0.35), P(0.05, -0.35)], fill=0, width=lw)
+            d.line([P(-0.75, 0.15), P(-0.2, 0.15)], fill=0, width=lw)
             d.line([P(-0.75, 0.5), P(-0.35, 0.5)], fill=0, width=lw)
-            d.rectangle([P(0.3, -0.55), P(0.75, 0.45)], outline=0, width=lw) if w > 14 else None
-    else:
-        d.polygon(quad, fill=0, outline=255)
-    out = np.array(img) > 127
-    if not front:                      # dos de carte : trame claire
-        poly = Image.new("1", (W, H), 0)
-        ImageDraw.Draw(poly).polygon(quad, fill=1)
-        inside = np.array(poly)
-        out[inside & (bayer() < 0.25)] = True
-    return out
+            d.polygon([P(0.3, -0.55), P(0.75, -0.55), P(0.75, 0.45), P(0.3, 0.45)], outline=0)
+        if w > 30:
+            d.line([P(-0.95, -0.92), P(0.95, -0.92), P(0.95, 0.92), P(-0.95, 0.92), P(-0.95, -0.92)],
+                   fill=0, width=lw)
+        return np.array(img) > 127
+    d.polygon(quad, fill=0, outline=255)                 # dos de carte : noir, double liseré
+    if w * -cf > 6:
+        d.polygon([P(-0.7, -0.6), P(0.7, -0.6), P(0.7, 0.6), P(-0.7, 0.6)], outline=255)
+    return np.array(img) > 127
 
 
 # ================================================================ QR
@@ -409,154 +483,216 @@ def in_finder(r, c):
     return (r < 8 and c < 8) or (r < 8 and c >= n - 8) or (r >= n - 8 and c < 8)
 
 
+
+
 # ================================================================ scénario
 def build():
     frames = []
+    rng = np.random.default_rng(11)
 
-    def add(f, ms=FPS_MS):
+    def add(f, ms=FPS_MS, shake=(0, 0)):
+        if shake != (0, 0):
+            f = shift(f, shake[1], shake[0], False)
         frames.append((f.copy(), ms))
 
     black = np.zeros((H, W), dtype=bool)
     stage = black.copy()
     floor(stage)
 
-    # 0. allumage façon tube cathodique : un point, une ligne, puis l'image s'ouvre
-    add(black, 250)
-    for wdt in (2, 16, 60, 128):
+    # 0. allumage façon tube cathodique
+    add(black, 200)
+    for wdt in (2, 20, 70, 128):
         f = black.copy()
         f[32, 64 - wdt // 2:64 + wdt // 2] = True
-        add(f, 40)
-    for k, hh in enumerate((6, 16, 32)):
+        add(f, 35)
+    for k, hh in enumerate((8, 20, 32)):
         f = black.copy()
         f[32 - hh:32 + hh, :] = stage[32 - hh:32 + hh, :]
         f[32 - hh, :] = f[32 + hh - 1, :] = True
         if k == 0:
-            f[1::2, :] = False                      # lignes de balayage
-        add(f, 40)
-    add(stage, 250)
+            f[1::2, :] = False
+        add(f, 35)
+    add(stage, 220)
 
-    # 1. marche depuis la droite (vitesse calée sur la foulée), poussière aux pas
-    walk_frames, cycle = 36, 20
-    x_start, x_end = W + 12, W // 2
-    dust = []
-    last = {}
-    for i in range(walk_frames + 8):
-        if i < walk_frames:
-            p, amp = 2 * pi * i / cycle, 1.0
-            x = lerp(x_start, x_end + 6, i / walk_frames)
-        else:                                       # pas d'arrêt
-            j = (i - walk_frames + 1) / 8
-            p, amp = 2 * pi * (walk_frames + (i - walk_frames) * 0.5) / cycle, 1 - ease(j)
-            x = lerp(x_end + 6, x_end, ease(j))
+    # 1. traits de vitesse annoncent l'arrivée, puis le personnage fonce depuis la droite
+    for _ in range(3):
+        add(speed_lines(stage, rng, 8))
+    x, ghosts, p = W + 16.0, [], 0.0
+    stop_x = 62.0
+    while x > stop_x + 18:
+        f = speed_lines(stage, rng)
         fig = Figure(x, -pi / 2)
-        parts, head, _, legs = build_pose(p, amp)
-        f = compose(fig, parts, head)
-        for sgn, (toe, q) in legs.items():          # contact du talon -> nuage de poussière
-            ph = (q - pi / 2) % (2 * pi)
-            if sgn in last and ph < last[sgn] and amp > 0.5:
-                tx, _, _ = fig.project(toe)
-                dust += [[tx - 3, 60.0, -0.5, -0.35, 0], [tx + 1, 60.0, 0.6, -0.45, 0], [tx - 1, 59.0, 0.1, -0.6, 0]]
-            last[sgn] = ph
-        for d in dust:
-            d[0] += d[2]; d[1] += d[3]; d[4] += 1
-            if d[4] < 7 and (d[4] < 3 or d[4] % 2 == 0) and 0 <= int(d[0]) < W:
-                f[int(d[1]), int(d[0])] = True
-        dust = [d for d in dust if d[4] < 7]
+        parts, head, _ = build_pose(walk=p, amp=1.0, run=True)
+        for lvl, g in zip((0.45, 0.25, 0.12), ghosts[::-1]):   # images rémanentes
+            put_figure(f, *g, level=lvl)
+        floor(f, x)
+        put_figure(f, fig, parts, head)
         add(f)
+        ghosts = (ghosts + [(fig, parts, head)])[-3:]
+        x -= 9.0
+        p += 2 * pi / 7
 
-    # 2. demi-tour vers l'écran
-    for k in range(1, 11):
-        fig = Figure(x_end, lerp(-pi / 2, 0, ease(k / 10)))
-        parts, head, _, _ = build_pose()
-        add(compose(fig, parts, head))
-    fig = Figure(x_end, 0.0)
-    parts, head, _, _ = build_pose()
-    add(compose(fig, parts, head), 350)
-    add(compose(fig, parts, head, eyes="happy", smile=True), 160)
-    add(compose(fig, parts, head, smile=True), 250)
-
-    # 3. tend la carte
-    card_w, card_h = 11.0, 7.0
-    for k in range(1, 11):
-        r = k / 10
-        parts, head, hand, _ = build_pose(reach=r)
-        f = compose(fig, parts, head, smile=True)
-        if r > 0.55:
-            s = ease((r - 0.55) / 0.45)
-            hx, hy, _ = fig.project(hand)
-            f = draw_card(f, hx - 3 * s, hy - 1, card_w * s, card_h * s, 0.0)
-        add(f)
-    parts, head, hand, _ = build_pose(reach=1.0)
-    hx, hy, _ = fig.project(hand)
-    ccx, ccy = hx - 3, hy - 1
-    held = draw_card(compose(fig, parts, head, smile=True), ccx, ccy, card_w, card_h, 0.0)
-    add(held, 200)
-    # éclat sur le coin de la carte
-    sx, sy = int(ccx - card_w / 2), int(ccy - card_h / 2)
-    for size in (1, 2, 4, 2, 1):
-        f = held.copy()
-        sparkle(f, sx, sy, size)
-        add(f, 50)
-    add(held, 150)
-
-    # 4. la carte s'envole en tournant et remplit l'écran ; le personnage se dissout
-    n = 16
+    # 2. dérapage : penché en arrière, poussière et étincelles, secousse
+    dust = []
+    n = 9
+    x0 = x
     for k in range(1, n + 1):
         t = k / n
-        e = t * t
-        cw = card_w * (134 / card_w) ** e
-        chh = card_h * (70 / card_h) ** e
-        f = compose(fig, parts, head, smile=True, fade=min(1.0, t * 1.6))
-        f = draw_card(f, lerp(ccx, 64, ease(t)), lerp(ccy, 32, ease(t)), cw, chh, 2 * pi * ease(t))
+        x = lerp(x0, stop_x, 1 - (1 - t) ** 3)
+        pose = mix_pose(SKID, READY, ease((t - 0.6) / 0.4)) if t > 0.6 else SKID
+        fig = Figure(x, -pi / 2)
+        parts, head, _ = build_pose(pose)
+        f = stage.copy()
+        floor(f, x)
+        if k <= 4:
+            for g, lvl in zip(ghosts[::-1], (0.3, 0.15)):
+                put_figure(f, *g, level=lvl)
+            ghosts = ghosts[1:]
+        if k < 7:
+            for _ in range(4):
+                dust.append([x + 4 + rng.random() * 6, 60.0, 0.8 + rng.random() * 1.8, -0.6 - rng.random() * 1.2, 0])
+        for d in dust:
+            d[0] += d[2]; d[1] += d[3]; d[3] += 0.25; d[4] += 1
+            if d[4] < 8 and 0 <= int(d[0]) < W and 0 <= int(d[1]) < H:
+                f[int(d[1]), int(d[0])] = True
+                if d[4] < 3 and int(d[0]) + 1 < W:
+                    f[int(d[1]), int(d[0]) + 1] = True
+        dust = [d for d in dust if d[4] < 8]
+        put_figure(f, fig, parts, head)
+        add(f, 45, shake=((1, -1, 1, 0)[k % 4] if k < 5 else 0, 0))
+
+    # 3. demi-tour éclair vers l'écran
+    for k in range(1, 5):
+        t = ease(k / 4)
+        fig = Figure(stop_x, lerp(-pi / 2, 0, t))
+        parts, head, _ = build_pose(READY)
+        f = stage.copy(); floor(f, stop_x)
+        add(put_figure(f, fig, parts, head), 35)
+    fig = Figure(stop_x, 0.0)
+    parts, head, _ = build_pose(READY)
+    ready = stage.copy()
+    floor(ready, stop_x)
+    put_figure(ready, fig, parts, head)
+    add(ready, 260)
+
+    # 4. les yeux s'allument : éclat + image d'impact inversée
+    eyes = eye_points(fig, head)
+    for size in (2, 4):
+        f = ready.copy()
+        for ex, ey, _ in eyes:
+            sparkle(f, ex, ey, size)
+        add(f, 50)
+    f = ready.copy()
+    for ex, ey, _ in eyes:
+        sparkle(f, ex, ey, 6)
+    add(~f, 70)
+    add(ready, 160)
+
+    # 5. armé du lancer, lignes de concentration
+    cy_focus = 34
+    for k in range(1, 8):
+        t = ease(k / 7)
+        pose = mix_pose(READY, WINDUP, t)
+        figk = Figure(stop_x, lerp(0, -0.35, t))
+        parts, head, hand = build_pose(pose)
+        f = focus_lines(black, stop_x, cy_focus, 38, rng)
+        floor(f, stop_x)
+        put_figure(f, figk, parts, head)
+        if k >= 3:                                        # la carte apparaît entre les doigts
+            hx, hy, _ = figk.project(hand)
+            f = draw_card(f, hx, hy - 2, 7, 4.5, rot=-0.6)
         add(f)
+    for _ in range(3):                                    # tension
+        f = focus_lines(black, stop_x, cy_focus, 34, rng, 36)
+        floor(f, stop_x)
+        put_figure(f, figk, parts, head)
+        f = draw_card(f, hx, hy - 2, 7, 4.5, rot=-0.6)
+        add(f, 60)
+    wind_hand = (hx, hy - 2)
 
-    # 5. flash + lignes de balayage + petit décalage de lignes (glitch)
+    # 6. LANCER : bras en traînée, la carte part en tournoyant vers l'écran
+    for k, t in enumerate((0.45, 1.0)):
+        pose = mix_pose(WINDUP, THROW, t)
+        figk = Figure(stop_x, lerp(-0.35, 0.35, t))
+        parts, head, hand = build_pose(pose)
+        f = focus_lines(black, stop_x, cy_focus, 38, rng)
+        floor(f, stop_x)
+        hx, hy, _ = figk.project(hand)
+        img = Image.fromarray(f.astype(np.uint8) * 255)
+        dr = ImageDraw.Draw(img)
+        for o in (-3, 0, 3):                              # traînée du geste
+            dr.line([(wind_hand[0] + o, wind_hand[1]), ((wind_hand[0] + hx) / 2 + o, min(wind_hand[1], hy) - 6),
+                     (hx + o, hy)], fill=255, width=1)
+        f = np.array(img) > 127
+        put_figure(f, figk, parts, head)
+        add(f, 40)
+    throw_fig, throw_parts, throw_head = figk, parts, head
+    start = (hx, hy)
+
+    n = 12
+    trail = []
+    for k in range(1, n + 1):
+        t = k / n
+        e = t ** 1.7
+        cw, chh = 7 * (150 / 7) ** e, 4.5 * (78 / 4.5) ** e
+        cx = lerp(start[0], 64, ease(t))
+        cy = lerp(start[1], 32, ease(t)) - 16 * sin(pi * min(t * 1.4, 1))   # trajectoire en cloche
+        rot = 4 * pi * (1 - t) ** 2
+        flip = 4 * pi * ease(t)
+        f = focus_lines(black, cx, cy, 20 + 30 * t, rng, 24)
+        floor(f, stop_x)
+        put_figure(f, throw_fig, throw_parts, throw_head)
+        for (tx, ty, tw, th, tr, tf), lvl in zip(trail[-2:], (0.25, 0.5)):
+            ghost = draw_card(black.copy(), tx, ty, tw, th, tr, tf)
+            f |= ghost & (bayer() < lvl)
+        f = draw_card(f, cx, cy, cw, chh, rot, flip)
+        trail.append((cx, cy, cw, chh, rot, flip))
+        add(f, 40 if t < 0.7 else 30)
+
+    # 7. IMPACT : écran blanc, éclat noir, secousse
     white = np.ones((H, W), dtype=bool)
-    add(white, 60)
+    add(white, 40)
+    add(burst(black, 64, 32, rng, 26), 50)
+    add(~burst(black, 64, 32, rng, 18), 50, shake=(2, 1))
+    add(white, 40, shake=(-2, 0))
     f = white.copy(); f[::2, :] = False
-    add(f, 40)
-    f = white.copy()
-    for y0, dx in ((10, 6), (30, -4), (46, 3)):
-        f[y0:y0 + 3, :] = np.roll(f[y0:y0 + 3, :], dx, axis=1)
-        f[y0 + 1, :] = False
-    add(f, 40)
-    add(white, 80)
+    add(f, 35)
+    add(white, 60)
 
-    # 6. les modules tombent en place : d'abord les trois repères, puis le reste
-    rng = np.random.default_rng(3)
+    # 8. les modules tombent en place : d'abord les trois repères, puis le reste
     mods = list(zip(*np.nonzero(QR)))
-    start, fall = {}, 5
+    start_at, fall = {}, 4
     for r, c in mods:
-        start[(r, c)] = rng.integers(0, 3) if in_finder(r, c) else 4 + c * 0.45 + rng.random() * 5
-    end = int(max(start.values())) + fall + 1
+        start_at[(r, c)] = rng.integers(0, 3) if in_finder(r, c) else 3 + c * 0.35 + rng.random() * 4
+    end = int(max(start_at.values())) + fall + 1
     for fr in range(end):
         f = white.copy()
-        for (r, c), s0 in start.items():
+        landed_finders = fr == int(2 + fall)
+        for (r, c), s0 in start_at.items():
             t = (fr - s0) / fall
             if t <= 0:
                 continue
             ty = QR_Y + r * QR_M
             module(f, r, c, ty if t >= 1 else lerp(-QR_M - 2, ty, t * t))
-        add(f, 35)
+        add(f, 30, shake=(1, 0) if landed_finders else (0, 0))
 
-    # 7. balayage de lecture puis textes
+    # 9. balayage de lecture puis textes
     qr_only = white.copy()
     for r, c in mods:
         module(qr_only, r, c)
-    for y in range(QR_Y - 2, QR_Y + QR_N * QR_M + 2, 7):
+    for y in range(QR_Y - 2, QR_Y + QR_N * QR_M + 2, 8):
         f = qr_only.copy()
         f[y:y + 2, QR_X - 3:QR_X + QR_N * QR_M + 3] ^= True
-        add(f, 30)
-    seq = ["S", "SC", "SCA", "SCAN"]
-    for s in seq:
-        f = qr_only.copy(); text(f, 6, 21, s, False); add(f, 45)
+        add(f, 28)
+    for s in ("S", "SC", "SCA", "SCAN"):
+        f = qr_only.copy(); text(f, 6, 21, s, False); add(f, 40)
     for s in ("M", "ME"):
-        f = qr_only.copy(); text(f, 6, 21, "SCAN", False); text(f, 12, 33, s, False); add(f, 45)
+        f = qr_only.copy(); text(f, 6, 21, "SCAN", False); text(f, 12, 33, s, False); add(f, 40)
     f = qr_only.copy(); text(f, 6, 21, "SCAN", False); text(f, 12, 33, "ME", False)
-    g = f.copy(); sparkle(g, LOGO_X + 7, LOGO_Y + 7, 3, False); add(g, 60)
+    sparkle(f, LOGO_X + 7, LOGO_Y + 7, 3, False)
+    add(f, 60)
 
-    final = qr_final()
-    add(final, QR_HOLD_MS)
+    add(qr_final(), QR_HOLD_MS)
     return frames
 
 
