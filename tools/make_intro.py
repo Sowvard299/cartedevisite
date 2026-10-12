@@ -6,8 +6,8 @@ ronds lumineux), construit en 3D (capsules + ellipsoïde), rendu en
 sur-échantillonnage, éclairé en aplats tramés (Bayer 8x8), avec contour
 lumineux et traits intérieurs.
 
-Scénario façon anime (~11 s, chaque plan nommé ; voir tools/audit_intro.py) :
-  démarrage    : point, ligne, neige, invite "> BOOT CARD_OS", barre de progression
+Scénario façon anime (~14 s, chaque plan nommé ; voir tools/audit_intro.py) :
+  allumage     : point, ligne, neige
   1 profil     : traits de vitesse, il fonce (images rémanentes), dérape, s'immobilise
   2 gros plan  : il tourne la tête, orbites vides, les yeux s'allument (un seul
                  flash inversé), la visée se resserre : LOCK
@@ -725,7 +725,7 @@ def build():
     """Liste de (image, durée ms, nom du plan)."""
     frames = []
     rng = np.random.default_rng(11)
-    shot = ["boot"]
+    shot = ["0 allumage"]
 
     def add(f, ms=FPS_MS, shake=(0, 0)):
         if shake != (0, 0):
@@ -734,7 +734,7 @@ def build():
 
     black = np.zeros((H, W), dtype=bool)
 
-    # ---- 0. DÉMARRAGE : point, ligne, neige légère, invite de commande
+    # ---- 0. ALLUMAGE : point, ligne, neige légère
     add(black, 250)
     for wdt in (2, 20, 70, 128):
         f = black.copy()
@@ -745,29 +745,6 @@ def build():
         f[32 - hh:32 + hh, :] = rng.random((2 * hh, W)) < 0.18       # neige (peu dense : pas de flash)
         add(f, 40)
     add(black, 120)
-    lines = ["> BOOT CARD_OS", "> SCAN PROFILE", "> TARGET LOCKED"]
-    for li, line in enumerate(lines):
-        for n in range(3, len(line) + 3, 3):
-            f = black.copy()
-            for lj in range(li):
-                text(f, 4, 6 + lj * 11, lines[lj], True)
-            text(f, 4, 6 + li * 11, line[:n] + "_", True)
-            add(f, 30)
-        if li == 1:                                                   # barre de progression
-            for p in (0, 35, 70, 100):
-                g = f.copy()
-                g[48:52, 4:124] = False
-                g[48, 4:124] = g[51, 4:124] = True
-                g[48:52, 4] = g[48:52, 123] = True
-                g[49:51, 5:5 + int(118 * p / 100)] = True
-                text(g, 4, 55, f"{p}%" if p < 100 else "OK", True)
-                add(g, 60)
-    f = black.copy()
-    for lj, line in enumerate(lines):
-        text(f, 4, 6 + lj * 11, line, True)
-    add(f, 300)
-    for k in range(4):                                                # l'interface s'efface en trame
-        add(f & (bayer() >= (k + 1) / 4), 40)
 
     # ---- PLAN 1 (large, de profil) : il fonce depuis la droite et dérape
     shot[0] = "1 course + dérapage"
@@ -859,7 +836,7 @@ def build():
         g[53:63, 2] = g[53:63, 1 + bw] = True
         text(g, 5, 56, shown, True, SMALL)
         add(g, 45)
-    add(g, 700)
+    add(g, 1400)                                                     # temps de lecture du nom
 
     # ---- PLAN 3 (vue de dessus, la caméra descend) : il arme et lance la carte
     shot[0] = "3 vue de dessus, lancer"
@@ -940,7 +917,7 @@ def build():
     for k in range(3, total + 3, 3):                                 # le texte se tape sur la carte
         add(card_face(k), 35)
     card = card_face()
-    add(card, 1700)                                                  # temps de lecture
+    add(card, 3200)                                                  # temps de lecture : nom, accroche, école
     shot[0] = "5c numérisation"
 
     # ---- la carte se numérise : ses traits se décomposent en pixels qui deviennent le QR
