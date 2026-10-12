@@ -7,10 +7,11 @@ sur-échantillonnage, éclairé en aplats tramés (Bayer 8x8), avec contour
 lumineux et traits intérieurs.
 
 Scénario façon anime :
-  allumage tube cathodique -> traits de vitesse, il fonce depuis la droite
-  (images rémanentes) -> dérapage (poussière, secousse) -> demi-tour éclair
-  -> les yeux s'allument (image d'impact inversée) -> il arme son lancer
-  (lignes de concentration) -> lance la carte qui tournoie vers l'écran ->
+  [plan large de profil] allumage, neige -> traits de vitesse, il fonce depuis la droite
+  (images rémanentes) -> dérapage (poussière, secousse) -> [gros plan] il tourne la tête
+  -> les yeux s'allument (image d'impact inversée) -> [vue de dessus, la caméra descend]
+  il arme son lancer et lance la carte qui file en tournoyant -> [de face] la carte
+  arrive droit sur l'écran (lignes de concentration) ->
   impact (éclat, secousse) -> les modules du QR tombent en place ->
   balayage -> textes -> QR fixe QR_HOLD_MS.
 
@@ -35,7 +36,7 @@ QR_HOLD_MS = 10_000
 W, H = 128, 64
 FPS_MS = 40             # 25 images/s ; un envoi I2C 400 kHz prend ~23 ms
 SS = 4                  # sur-échantillonnage du rendu du personnage
-FLOOR_Y = 61            # ligne de contact des pieds (écran)
+FLOOR_Y = 63            # pieds sur la dernière ligne : tout l'écran sert au personnage
 
 BAYER8 = (np.array([
     [0, 32, 8, 40, 2, 34, 10, 42], [48, 16, 56, 24, 50, 18, 58, 26],
@@ -85,10 +86,10 @@ SKID = dict(legs={-1: (0.6, 0.55), 1: (-0.45, 0.35)},
             arms={-1: (1.0, 0.5, 0.7), 1: (-0.9, 0.55, 0.3)}, lean=-0.32, spread=0.0)
 READY = dict(legs={-1: (0.05, 0.35), 1: (-0.05, 0.35)},
              arms={-1: (0.25, 0.3, 0.6), 1: (0.25, 0.3, 0.6)}, lean=0.05, spread=0.2)
-WINDUP = dict(legs={-1: (0.15, 0.45), 1: (-0.2, 0.4)},
-              arms={-1: (1.25, 0.05, 0.15), 1: (-1.7, 0.75, 1.2)}, lean=-0.18, spread=0.22)
-THROW = dict(legs={-1: (-0.1, 0.4), 1: (0.25, 0.5)},
-             arms={-1: (-0.7, 0.45, 0.5), 1: (1.55, -0.3, 0.02)}, lean=0.28, spread=0.22)
+WINDUP = dict(legs={-1: (0.15, 0.25), 1: (-0.2, 0.2)},
+              arms={-1: (1.25, 0.05, 0.15), 1: (-1.7, 0.75, 1.2)}, lean=-0.18, spread=0.12)
+THROW = dict(legs={-1: (-0.1, 0.2), 1: (0.3, 0.3)},
+             arms={-1: (-0.7, 0.45, 0.5), 1: (1.55, -0.3, 0.02)}, lean=0.28, spread=0.12)
 
 
 def mix_pose(a, b, t):
@@ -182,19 +183,30 @@ def build_pose(P=None, walk=0.0, amp=0.0, run=False):
 
 
 class Figure:
-    """Position et orientation à l'écran ; projette le repère local."""
+    """Caméra orthographique : position du personnage (cx, cy = pieds à l'écran),
+    orientation (yaw), plongée de la caméra (pitch, 0 = de face, pi/2 = vue de dessus)
+    et zoom (scale, pixels écran par unité)."""
 
-    def __init__(self, cx, yaw):
-        self.cx, self.yaw = cx, yaw
+    def __init__(self, cx, yaw, pitch=0.0, scale=1.0, cy=FLOOR_Y):
+        self.cx, self.cy, self.yaw, self.pitch, self.scale = cx, cy, yaw, pitch, scale
         self.c, self.s = cos(yaw), sin(yaw)
+        self.cp, self.sp = cos(pitch), sin(pitch)
 
     def project(self, p):
         x, y, z = p
-        return self.cx + x * self.c + z * self.s, FLOOR_Y - y, -x * self.s + z * self.c
+        X, Z = x * self.c + z * self.s, -x * self.s + z * self.c
+        up, depth = y * self.cp - Z * self.sp, y * self.sp + Z * self.cp
+        return self.cx + X * self.scale, self.cy - up * self.scale, depth * self.scale
 
     def facing(self, d):
         """Composante vers la caméra d'une direction locale."""
-        return -d[0] * self.s + d[2] * self.c
+        Z = -d[0] * self.s + d[2] * self.c
+        return d[1] * self.sp + Z * self.cp
+
+    def centered_on(self, p, x=W / 2, y=H / 2):
+        """Même caméra, recadrée pour que le point local p tombe en (x, y)."""
+        px, py, _ = self.project(p)
+        return Figure(self.cx + x - px, self.yaw, self.pitch, self.scale, self.cy + y - py)
 
 
 def render_figure(fig, parts):
@@ -207,25 +219,27 @@ def render_figure(fig, parts):
         ax, ay, az = fig.project(a)
         if kind == "egg":
             # ellipsoïde de révolution (axe vertical) : sa projection ne dépend pas du yaw
-            rx, ry = HEAD_RX * 1.12, HEAD_RY
+            sc = fig.scale
+            ryp = np.hypot(HEAD_RY * fig.cp, HEAD_RZ * fig.sp) * sc   # hauteur apparente selon la plongée
+            rx, ry = HEAD_RX * 1.12 * sc, ryp
             x0, x1 = int(max((ax - rx - 1) * SS, 0)), int(min((ax + rx + 1) * SS, ws))
             y0, y1 = int(max((ay - ry - 1) * SS, 0)), int(min((ay + ry + 1) * SS, hs))
             if x0 >= x1 or y0 >= y1:
                 continue
             yy, xx = np.mgrid[y0:y1, x0:x1]
-            v = ((yy + 0.5) / SS - ay) / HEAD_RY
-            rxv = HEAD_RX * (1 - 0.12 * v)                 # plus large en haut, menton plus fin
+            v = ((yy + 0.5) / SS - ay) / ryp
+            rxv = HEAD_RX * sc * (1 - 0.12 * v * fig.cp)   # plus large en haut, menton plus fin
             u = ((xx + 0.5) / SS - ax) / rxv
             d2 = u * u + v * v
             inside = d2 < 1
             h = np.sqrt(np.clip(1 - d2, 0, 1))
-            z = az + HEAD_RZ * h
-            n = np.stack([u / rxv, v / HEAD_RY, h / HEAD_RZ])
+            z = az + HEAD_RZ * sc * h
+            n = np.stack([u / rxv, v / ryp, h / (HEAD_RZ * sc)])
             n /= np.linalg.norm(n, axis=0)
             nx, ny, nz = n
         else:
             bx, by, bz = fig.project(b)
-            r = np.hypot(rl * fig.c, rd * fig.s) if rl != rd else rl
+            r = (np.hypot(rl * fig.c, rd * fig.s) if rl != rd else rl) * fig.scale
             x0 = int(max((min(ax, bx) - r - 1) * SS, 0)); x1 = int(min((max(ax, bx) + r + 1) * SS, ws))
             y0 = int(max((min(ay, by) - r - 1) * SS, 0)); y1 = int(min((max(ay, by) + r + 1) * SS, hs))
             if x0 >= x1 or y0 >= y1:
@@ -277,22 +291,24 @@ def ink_figure(fig, parts, head, eyes="glow"):
     lit = mask & (tone > bayer(int(fig.cx)))
     for dy, dx in ((0, 1), (0, -1), (1, 0), (-1, 0)):
         m2, g2, d2 = shift(mask, dy, dx, False), shift(grp, dy, dx, -1), shift(depth, dy, dx, -1e9)
-        lit &= ~(mask & m2 & (g2 != grp) & (d2 > depth + 0.8))   # une partie plus proche passe devant
+        lit &= ~(mask & m2 & (g2 != grp) & (d2 > depth + 0.8 * fig.scale))   # une partie plus proche passe devant
     rim = mask & ~(shift(mask, 0, 1, False) & shift(mask, 0, -1, False)
                    & shift(mask, 1, 0, False) & shift(mask, -1, 0, False))
     lit |= rim
+    yy, xx = np.indices((H, W))
     for x, y, f in eye_points(fig, head):
-        if f > 0.55:                    # œil de face : rond sombre, pupille lumineuse
-            for ex, ey in ((-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1),
-                           (0, -2), (0, 2), (-2, 0), (2, 0)):
-                if 0 <= x + ex < W and 0 <= y + ey < H:
-                    lit[y + ey, x + ex] = False
-            if eyes == "glow":
-                lit[y, x] = True
-        elif f > 0.12:                  # œil de profil : fente
-            for ey in (-1, 0, 1):
-                if 0 <= y + ey < H and 0 <= x < W:
-                    lit[y + ey, x] = ey == 0 and eyes == "glow"
+        # rond sombre, écrasé quand l'œil est vu de biais ; pupille lumineuse au centre
+        r = max(1.7, 1.05 * fig.scale)
+        rx, ry = max(r * f, 0.8), max(r * (0.35 + 0.65 * fig.cp), 0.8)
+        d = ((xx + 0.5 - x) / rx) ** 2 + ((yy + 0.5 - y) / ry) ** 2
+        ring = 1 + 1.4 / min(rx, ry)
+        lit[(d > 1) & (d <= ring * ring) & mask] = True   # liseré clair : l'orbite se détache de l'ombre
+        lit[d <= 1] = False
+        if eyes == "glow":
+            g = 0.42 if fig.scale > 1.8 else 0.3
+            lit[d <= g * g] = True
+            if not (d <= g * g).any() and 0 <= int(x) < W and 0 <= int(y) < H:
+                lit[int(y), int(x)] = True
     return lit, mask
 
 
@@ -304,21 +320,11 @@ def eye_points(fig, head):
         if f > 0.12:
             p = head + v3(d[0] * HEAD_RX, d[1] * HEAD_RY, d[2] * HEAD_RZ)
             x, y, _ = fig.project(p)
-            out.append((int(round(x)), int(round(y)), f))
+            out.append((x, y, f))
     return out
 
 
 # ================================================================ décor et effets
-def floor(buf, shadow_x=None):
-    """Sol en perspective : rangées de points de plus en plus serrées."""
-    for y, step, off in ((58, 8, 0), (60, 5, 2), (62, 3, 1), (63, 2, 0)):
-        buf[y, off::step] = True
-    if shadow_x is not None:
-        yy, xx = np.indices((H, W))
-        sh = ((xx - shadow_x) / 12.0) ** 2 + ((yy - 61) / 2.6) ** 2 < 1
-        buf[sh] = False
-
-
 def speed_lines(buf, rng, n=14):
     """Traits horizontaux de vitesse (le personnage file vers la gauche)."""
     img = Image.fromarray(buf.astype(np.uint8) * 255)
@@ -382,33 +388,61 @@ def put_figure(buf, fig, parts, head, eyes="glow", level=1.0):
 
 
 # ================================================================ carte
-def draw_card(buf, cx, cy, w, h, rot=0.0, flip=0.0):
-    """Carte tournant dans le plan (rot) et autour de son axe vertical (flip)."""
+def _card(buf, P, size, front):
+    """Dessine une carte dont P(u, v) (u, v dans [-1, 1]) donne les coins à l'écran."""
     img = Image.fromarray(buf.astype(np.uint8) * 255)
     d = ImageDraw.Draw(img)
+    quad = [P(-1, -1), P(1, -1), P(1, 1), P(-1, 1)]
+    lw = max(1, int(size / 45))
+    if front:
+        d.polygon(quad, fill=255, outline=0)
+        if size > 9:
+            d.line([P(-0.75, -0.35), P(0.05, -0.35)], fill=0, width=lw)
+            d.line([P(-0.75, 0.15), P(-0.2, 0.15)], fill=0, width=lw)
+            d.line([P(-0.75, 0.5), P(-0.35, 0.5)], fill=0, width=lw)
+            d.polygon([P(0.3, -0.55), P(0.75, -0.55), P(0.75, 0.45), P(0.3, 0.45)], outline=0)
+        if size > 30:
+            d.line([P(-0.95, -0.92), P(0.95, -0.92), P(0.95, 0.92), P(-0.95, 0.92), P(-0.95, -0.92)],
+                   fill=0, width=lw)
+    else:
+        d.polygon(quad, fill=0, outline=255)             # dos de carte : noir, double liseré
+        if size > 6:
+            d.polygon([P(-0.7, -0.6), P(0.7, -0.6), P(0.7, 0.6), P(-0.7, 0.6)], outline=255)
+    return np.array(img) > 127
+
+
+def draw_card(buf, cx, cy, w, h, rot=0.0, flip=0.0):
+    """Carte face caméra, tournant dans le plan (rot) et autour de son axe vertical (flip)."""
     cf = cos(flip)
 
     def P(u, v):
         x, y = u * w / 2 * cf, v * h / 2
         return (cx + x * cos(rot) - y * sin(rot), cy + x * sin(rot) + y * cos(rot))
 
-    quad = [P(-1, -1), P(1, -1), P(1, 1), P(-1, 1)]
-    lw = max(1, int(w / 45))
-    if cf > 0:
-        d.polygon(quad, fill=255, outline=0)
-        if w * cf > 9:
-            d.line([P(-0.75, -0.35), P(0.05, -0.35)], fill=0, width=lw)
-            d.line([P(-0.75, 0.15), P(-0.2, 0.15)], fill=0, width=lw)
-            d.line([P(-0.75, 0.5), P(-0.35, 0.5)], fill=0, width=lw)
-            d.polygon([P(0.3, -0.55), P(0.75, -0.55), P(0.75, 0.45), P(0.3, 0.45)], outline=0)
-        if w > 30:
-            d.line([P(-0.95, -0.92), P(0.95, -0.92), P(0.95, 0.92), P(-0.95, 0.92), P(-0.95, -0.92)],
-                   fill=0, width=lw)
-        return np.array(img) > 127
-    d.polygon(quad, fill=0, outline=255)                 # dos de carte : noir, double liseré
-    if w * -cf > 6:
-        d.polygon([P(-0.7, -0.6), P(0.7, -0.6), P(0.7, 0.6), P(-0.7, 0.6)], outline=255)
-    return np.array(img) > 127
+    return _card(buf, P, w * abs(cf), cf > 0)
+
+
+def draw_card3d(buf, fig, center, w, h, spin):
+    """Carte posée à plat (horizontale) dans la scène 3D, tournant comme un frisbee."""
+    def P(u, v):
+        a, b = u * w / 2, v * h / 2
+        x, y, _ = fig.project(center + v3(a * cos(spin) - b * sin(spin), 0, a * sin(spin) + b * cos(spin)))
+        return (x, y)
+
+    img = Image.fromarray(buf.astype(np.uint8) * 255)          # halo noir : la carte se détache
+    ImageDraw.Draw(img).polygon([P(-1, -1), P(1, -1), P(1, 1), P(-1, 1)], fill=0, outline=0, width=3)
+    return _card(np.array(img) > 127, P, w * fig.scale, fig.facing(v3(0, 1, 0)) > 0)
+
+
+def spotlight(buf, fig, radius=24.0):
+    """Vue de dessus : flaque de lumière tramée au sol, ombre sous le personnage."""
+    gx, gy, _ = fig.project(v3(0, 0, 0))
+    rx, ry = radius * fig.scale, radius * fig.scale * fig.sp
+    yy, xx = np.indices((H, W))
+    d = ((xx - gx) / rx) ** 2 + ((yy - gy) / ry) ** 2
+    pool = (d < 1) & (bayer() < 0.32 * (1 - d) + 0.04)
+    buf |= pool
+    return buf
 
 
 # ================================================================ QR
@@ -496,160 +530,156 @@ def build():
         frames.append((f.copy(), ms))
 
     black = np.zeros((H, W), dtype=bool)
-    stage = black.copy()
-    floor(stage)
 
-    # 0. allumage façon tube cathodique
+    # ---- 0. allumage : un point, une ligne, de la neige, le noir
     add(black, 200)
     for wdt in (2, 20, 70, 128):
         f = black.copy()
         f[32, 64 - wdt // 2:64 + wdt // 2] = True
         add(f, 35)
-    for k, hh in enumerate((8, 20, 32)):
+    for hh in (6, 32):
         f = black.copy()
-        f[32 - hh:32 + hh, :] = stage[32 - hh:32 + hh, :]
-        f[32 - hh, :] = f[32 + hh - 1, :] = True
-        if k == 0:
-            f[1::2, :] = False
-        add(f, 35)
-    add(stage, 220)
+        f[32 - hh:32 + hh, :] = rng.random((2 * hh, W)) < 0.45     # neige
+        add(f, 40)
+    add(black, 160)
 
-    # 1. traits de vitesse annoncent l'arrivée, puis le personnage fonce depuis la droite
+    # ---- PLAN 1 (large, de profil) : il fonce depuis la droite et dérape
+    S1 = 1.08                                    # personnage sur toute la hauteur de l'écran
     for _ in range(3):
-        add(speed_lines(stage, rng, 8))
-    x, ghosts, p = W + 16.0, [], 0.0
-    stop_x = 62.0
-    while x > stop_x + 18:
-        f = speed_lines(stage, rng)
-        fig = Figure(x, -pi / 2)
+        add(speed_lines(black, rng, 8))
+    x, ghosts, p = W + 20.0, [], 0.0
+    stop_x = 64.0
+    while x > stop_x + 20:
+        f = speed_lines(black, rng)
+        fig = Figure(x, -pi / 2, scale=S1)
         parts, head, _ = build_pose(walk=p, amp=1.0, run=True)
-        for lvl, g in zip((0.45, 0.25, 0.12), ghosts[::-1]):   # images rémanentes
+        for lvl, g in zip((0.45, 0.25, 0.12), ghosts[::-1]):     # images rémanentes
             put_figure(f, *g, level=lvl)
-        floor(f, x)
         put_figure(f, fig, parts, head)
         add(f)
         ghosts = (ghosts + [(fig, parts, head)])[-3:]
-        x -= 9.0
+        x -= 10.0
         p += 2 * pi / 7
 
-    # 2. dérapage : penché en arrière, poussière et étincelles, secousse
     dust = []
-    n = 9
-    x0 = x
+    n, x0 = 9, x
     for k in range(1, n + 1):
         t = k / n
         x = lerp(x0, stop_x, 1 - (1 - t) ** 3)
         pose = mix_pose(SKID, READY, ease((t - 0.6) / 0.4)) if t > 0.6 else SKID
-        fig = Figure(x, -pi / 2)
+        fig = Figure(x, -pi / 2, scale=S1)
         parts, head, _ = build_pose(pose)
-        f = stage.copy()
-        floor(f, x)
+        f = black.copy()
         if k <= 4:
             for g, lvl in zip(ghosts[::-1], (0.3, 0.15)):
                 put_figure(f, *g, level=lvl)
             ghosts = ghosts[1:]
         if k < 7:
             for _ in range(4):
-                dust.append([x + 4 + rng.random() * 6, 60.0, 0.8 + rng.random() * 1.8, -0.6 - rng.random() * 1.2, 0])
+                dust.append([x + 4 + rng.random() * 6, 62.0, 0.8 + rng.random() * 1.8, -0.7 - rng.random() * 1.3, 0])
         for d in dust:
             d[0] += d[2]; d[1] += d[3]; d[3] += 0.25; d[4] += 1
-            if d[4] < 8 and 0 <= int(d[0]) < W and 0 <= int(d[1]) < H:
+            if d[4] < 8 and 0 <= int(d[0]) < W - 1 and 0 <= int(d[1]) < H:
                 f[int(d[1]), int(d[0])] = True
-                if d[4] < 3 and int(d[0]) + 1 < W:
+                if d[4] < 3:
                     f[int(d[1]), int(d[0]) + 1] = True
         dust = [d for d in dust if d[4] < 8]
         put_figure(f, fig, parts, head)
         add(f, 45, shake=((1, -1, 1, 0)[k % 4] if k < 5 else 0, 0))
+    add(f, 120)
 
-    # 3. demi-tour éclair vers l'écran
-    for k in range(1, 5):
-        t = ease(k / 4)
-        fig = Figure(stop_x, lerp(-pi / 2, 0, t))
-        parts, head, _ = build_pose(READY)
-        f = stage.copy(); floor(f, stop_x)
-        add(put_figure(f, fig, parts, head), 35)
-    fig = Figure(stop_x, 0.0)
+    # ---- PLAN 2 (gros plan, de face) : il tourne la tête vers nous, les yeux s'allument
     parts, head, _ = build_pose(READY)
-    ready = stage.copy()
-    floor(ready, stop_x)
-    put_figure(ready, fig, parts, head)
-    add(ready, 260)
-
-    # 4. les yeux s'allument : éclat + image d'impact inversée
+    for k in range(6):                           # lent travelling avant pendant le demi-tour
+        t = k / 5
+        fig = Figure(64, lerp(-1.2, 0, ease(t)), scale=lerp(2.5, 2.8, t)).centered_on(head, 64, 31)
+        add(put_figure(black.copy(), fig, parts, head, eyes="off"), 50)
+    fig = Figure(64, 0.0, scale=2.9).centered_on(head, 64, 31)
+    dark = put_figure(black.copy(), fig, parts, head, eyes="off")
+    add(dark, 220)
+    lit = put_figure(black.copy(), fig, parts, head)
     eyes = eye_points(fig, head)
-    for size in (2, 4):
-        f = ready.copy()
+    for size in (3, 7):
+        f = lit.copy()
         for ex, ey, _ in eyes:
-            sparkle(f, ex, ey, size)
-        add(f, 50)
-    f = ready.copy()
+            sparkle(f, int(ex), int(ey), size)
+        add(f, 45)
+    f = focus_lines(black, 64, 31, 40, rng, 30)
+    f[lit | dark] = False
+    f |= lit
     for ex, ey, _ in eyes:
-        sparkle(f, ex, ey, 6)
-    add(~f, 70)
-    add(ready, 160)
+        sparkle(f, int(ex), int(ey), 12)
+    add(~f, 60)                                  # image d'impact inversée
+    for _ in range(3):
+        f = focus_lines(black, 64, 31, 40, rng, 30)
+        fig2 = Figure(64, 0.0, scale=3.1).centered_on(head, 64, 31)
+        add(put_figure(f, fig2, parts, head), 60)
 
-    # 5. armé du lancer, lignes de concentration
-    cy_focus = 34
-    for k in range(1, 8):
-        t = ease(k / 7)
+    # ---- PLAN 3 (vue de dessus, la caméra descend) : il arme et lance la carte
+    def overhead(t):
+        return Figure(64, 0.0, pitch=lerp(1.15, 0.8, t), scale=1.55).centered_on(v3(0, 26, 2), 64, 31)
+
+    for k in range(1, 9):
+        t = ease(k / 8)
         pose = mix_pose(READY, WINDUP, t)
-        figk = Figure(stop_x, lerp(0, -0.35, t))
+        figk = overhead(k / 12)
+        figk = Figure(figk.cx, lerp(0, -0.4, t), figk.pitch, figk.scale, figk.cy)
         parts, head, hand = build_pose(pose)
-        f = focus_lines(black, stop_x, cy_focus, 38, rng)
-        floor(f, stop_x)
+        f = spotlight(black.copy(), figk)
         put_figure(f, figk, parts, head)
-        if k >= 3:                                        # la carte apparaît entre les doigts
-            hx, hy, _ = figk.project(hand)
-            f = draw_card(f, hx, hy - 2, 7, 4.5, rot=-0.6)
-        add(f)
-    for _ in range(3):                                    # tension
-        f = focus_lines(black, stop_x, cy_focus, 34, rng, 36)
-        floor(f, stop_x)
-        put_figure(f, figk, parts, head)
-        f = draw_card(f, hx, hy - 2, 7, 4.5, rot=-0.6)
-        add(f, 60)
-    wind_hand = (hx, hy - 2)
+        if k >= 4:                                # la carte apparaît entre les doigts
+            f = draw_card3d(f, figk, hand + v3(0, 1.5, 0), 8, 5.5, 0.5)
+        add(f, 50 if k < 8 else 160)
+    wx, wy, _ = figk.project(hand)
 
-    # 6. LANCER : bras en traînée, la carte part en tournoyant vers l'écran
-    for k, t in enumerate((0.45, 1.0)):
+    for k, t in enumerate((0.5, 1.0)):            # LANCER
         pose = mix_pose(WINDUP, THROW, t)
-        figk = Figure(stop_x, lerp(-0.35, 0.35, t))
+        base = overhead((9 + k) / 12)
+        figk = Figure(base.cx, lerp(-0.4, 0.4, t), base.pitch, base.scale, base.cy)
         parts, head, hand = build_pose(pose)
-        f = focus_lines(black, stop_x, cy_focus, 38, rng)
-        floor(f, stop_x)
+        f = spotlight(black.copy(), figk)
         hx, hy, _ = figk.project(hand)
         img = Image.fromarray(f.astype(np.uint8) * 255)
         dr = ImageDraw.Draw(img)
-        for o in (-3, 0, 3):                              # traînée du geste
-            dr.line([(wind_hand[0] + o, wind_hand[1]), ((wind_hand[0] + hx) / 2 + o, min(wind_hand[1], hy) - 6),
-                     (hx + o, hy)], fill=255, width=1)
+        for o in (-4, -1, 2):                     # traînée du geste
+            dr.line([(wx, wy + o), ((wx + hx) / 2 + 6, (wy + hy) / 2 + o), (hx, hy + o)], fill=255)
         f = np.array(img) > 127
         put_figure(f, figk, parts, head)
         add(f, 40)
-    throw_fig, throw_parts, throw_head = figk, parts, head
-    start = (hx, hy)
-
-    n = 12
+    throw = (figk, parts, head)
+    release = hand + v3(0, 1.5, 0)
     trail = []
+    for k in range(1, 10):                        # la carte file vers le bas de l'écran en tournoyant
+        t = k / 9
+        c = release + v3(6 * t, 10 * t, 42 * t * t)
+        spin = 0.5 + 9 * t
+        f = spotlight(black.copy(), throw[0])
+        put_figure(f, *throw)
+        for tc, ts in trail[-2:]:
+            f |= draw_card3d(black.copy(), throw[0], tc, 9 + 6 * t, 6 + 4 * t, ts) & (bayer() < 0.35)
+        f = draw_card3d(f, throw[0], c, 9 + 6 * t, 6 + 4 * t, spin)
+        if k == 1:
+            f = burst(f, *throw[0].project(release)[:2], rng, 10)
+        trail.append((c, spin))
+        add(f, 40)
+
+    # ---- PLAN 4 (de face, caméra = cible) : la carte arrive droit sur l'écran
+    trail = []
+    n = 10
     for k in range(1, n + 1):
         t = k / n
-        e = t ** 1.7
-        cw, chh = 7 * (150 / 7) ** e, 4.5 * (78 / 4.5) ** e
-        cx = lerp(start[0], 64, ease(t))
-        cy = lerp(start[1], 32, ease(t)) - 16 * sin(pi * min(t * 1.4, 1))   # trajectoire en cloche
-        rot = 4 * pi * (1 - t) ** 2
-        flip = 4 * pi * ease(t)
-        f = focus_lines(black, cx, cy, 20 + 30 * t, rng, 24)
-        floor(f, stop_x)
-        put_figure(f, throw_fig, throw_parts, throw_head)
+        e = t ** 1.6
+        cw, chh = 5 * (150 / 5) ** e, 3.2 * (78 / 3.2) ** e
+        cx, cy = lerp(70, 64, t), lerp(26, 32, t)
+        rot, flip = 4 * pi * (1 - t) ** 2, 4 * pi * ease(t)
+        f = focus_lines(black, cx, cy, 14 + 30 * t, rng, 24)
         for (tx, ty, tw, th, tr, tf), lvl in zip(trail[-2:], (0.25, 0.5)):
-            ghost = draw_card(black.copy(), tx, ty, tw, th, tr, tf)
-            f |= ghost & (bayer() < lvl)
+            f |= draw_card(black.copy(), tx, ty, tw, th, tr, tf) & (bayer() < lvl)
         f = draw_card(f, cx, cy, cw, chh, rot, flip)
         trail.append((cx, cy, cw, chh, rot, flip))
         add(f, 40 if t < 0.7 else 30)
 
-    # 7. IMPACT : écran blanc, éclat noir, secousse
+    # ---- IMPACT : écran blanc, éclat noir, secousse
     white = np.ones((H, W), dtype=bool)
     add(white, 40)
     add(burst(black, 64, 32, rng, 26), 50)
@@ -659,7 +689,7 @@ def build():
     add(f, 35)
     add(white, 60)
 
-    # 8. les modules tombent en place : d'abord les trois repères, puis le reste
+    # ---- QR : les modules tombent en place (repères d'abord), balayage, textes
     mods = list(zip(*np.nonzero(QR)))
     start_at, fall = {}, 4
     for r, c in mods:
@@ -667,16 +697,14 @@ def build():
     end = int(max(start_at.values())) + fall + 1
     for fr in range(end):
         f = white.copy()
-        landed_finders = fr == int(2 + fall)
         for (r, c), s0 in start_at.items():
             t = (fr - s0) / fall
             if t <= 0:
                 continue
             ty = QR_Y + r * QR_M
             module(f, r, c, ty if t >= 1 else lerp(-QR_M - 2, ty, t * t))
-        add(f, 30, shake=(1, 0) if landed_finders else (0, 0))
+        add(f, 30, shake=(1, 0) if fr == 2 + fall else (0, 0))
 
-    # 9. balayage de lecture puis textes
     qr_only = white.copy()
     for r, c in mods:
         module(qr_only, r, c)
